@@ -1,0 +1,25 @@
+# Football Stats Pipeline - Dependencies
+
+# HTTP & Web
+requests>=2.28.0
+selenium-wire>=5.1.0
+
+# Environment
+python-dotenv>=1.0.0
+
+# MongoDB
+pymongo>=4.5.0
+
+# Data Validation
+pydantic>=2.0.0
+
+# Compression (if needed)
+brotli>=1.1.0
+
+# Timezone
+tzlocal>=5.0
+
+# Optional: For development
+# pytest>=7.0.0
+# black>=23.0.0
+# flake8>=6.0.0
