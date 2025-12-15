@@ -347,7 +347,7 @@ def run_pipeline(
         logger.error("Failed to fetch league data. Exiting.")
         return
     
-    popular_leagues = league_data.get("popular", [])
+    popular_leagues = league_data.get("international", [])
     popular_league_ids = [str(league.get("id")) for league in popular_leagues]
     
     # Apply league limit if specified
@@ -508,7 +508,7 @@ def run_pipeline(
                     # Progress logging every 50 matches
                     if total_matches_processed % 50 == 0:
                         logger.info(f"Progress: {total_matches_processed} matches processed, "
-                                   f"{total_matches_skipped} skipped, {total_matches_failed} failed")
+                                f"{total_matches_skipped} skipped, {total_matches_failed} failed")
                         
                 except Exception as e:
                     logger.error(f"Error processing match {match_id}: {e}")
