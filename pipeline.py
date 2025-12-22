@@ -347,8 +347,21 @@ def run_pipeline(
         logger.error("Failed to fetch league data. Exiting.")
         return
     
-    popular_leagues = league_data.get("international", [])
-    popular_league_ids = [str(league.get("id")) for league in popular_leagues]
+    # # popular or international leagues
+    # popular_leagues = league_data.get("international", [])
+
+    # all leagues
+    popular_leagues = league_data.get("countries", [])
+
+    # this portion is only for country leagues
+    popular_league_ids = [
+        league['id'] 
+        for country in popular_leagues
+        for league in country['leagues']
+    ]
+
+    # # this portion is only for popular and international leagues
+    # popular_league_ids = [str(league.get("id")) for league in popular_leagues]
     
     # Apply league limit if specified
     if league_limit:
@@ -363,9 +376,15 @@ def run_pipeline(
     total_matches_processed = 0
     total_matches_skipped = 0
     total_matches_failed = 0
+
+    leagues_to_skip = ["10913"]
     
     for league_idx, league_id in enumerate(popular_league_ids, 1):
         logger.info(f"{'='*30} Processing League {league_idx}/{len(popular_league_ids)}: {league_id} {'='*30}")
+        
+        if league_id in leagues_to_skip:
+            logger.warning(f"Skipping league {league_id}")
+            continue
         
         # Fetch league/season data - pass the X-MAS token
         season_data = get_specific_league_data(
