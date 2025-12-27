@@ -377,7 +377,10 @@ def run_pipeline(
     total_matches_skipped = 0
     total_matches_failed = 0
 
-    leagues_to_skip = ["10913"]
+    leagues_to_skip = ["10913", 285, 9173, 10175, 516, 112, 8965, 9213, 9305, 9381, 9170, 10007, 10832, 10075, 10053, 118, 113, 9495, 8938, 9471, 38, 119, 278,
+            262, 10443, 263, 9255, 9521, 9658, 40, 149, 41, 264, 266, 144, 9334, 267, 268, 8814, 8971, 9067, 9429, 10077, 10290, 10272, 10274, 10291, 10273,
+            10244, 10078, 9464, 270, 271, 9584,
+    ]
     
     for league_idx, league_id in enumerate(popular_league_ids, 1):
         logger.info(f"{'='*30} Processing League {league_idx}/{len(popular_league_ids)}: {league_id} {'='*30}")
