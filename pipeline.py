@@ -385,8 +385,13 @@ def run_pipeline(
             342,10713,53,110,8970,134,11028,9666,9667,9677,207,439,9310,54,146,208,209,512,9081,9734,10022,8924,9676,10840,10650,11034,522,135,145,
             8816,8815,336,337,212,213,215,216,217,10009,10226,10076,9478,10309,8982,10366,8983,10059,523,9372,9487,10288,524,10310,126,221,218,219,
             10307,9431,10210,127,128,9735,9097,9862,9098,55,86,141,147,222,11014,10178,10434,11015,223,8974,9136,9011,10716,224,440,9500,225,9504,529,
-            226,9486,228,9632,9493,229,9527,9174,249,9528,8985,230,8976,11039,9906,231,9530,10065,232,9178,530,10917,#57,111,9195,58,10289,10668,235,
-            #237,11029,9851,8870,533,129,9389,8978,8979,59,203,204,331,332,10714,333,10628,60,206,205,9754,9382,
+            226,9486,228,9632,9493,229,9527,9174,249,9528,8985,230,8976,11039,9906,231,9530,10065,232,9178,530,10917,57,111,9195,58,10289,10668,235,
+            237,11029,9851,8870,533,129,9389,8978,8979,59,203,204,331,332,10714,333,10628,60,#206,205,9754,9382,9039,10230,199,10259,131,196,197,198,
+            #200,8935,10967,61,185,187,9112,9668,10215,10449,10657,188,186,11016,535,11017,9661,11030,189,9113,190,192,9587,63,193,9333,195,338,9123,536,
+            #9942,10074,10783,64,123,124,125,181,179,9737,180,9738,9739,137,11020,10791,11019,182,183,10583,461,9143,176,8973,177,9845,173,492,174,10708,
+            #9473,537,9474,10584,9080,9422,9551,9116,9537,10188,87,140,8968,9138,9907,138,139,10651,10776,67,68,168,172,9089,171,9634,10316,10308,169,
+            #69,163,70,164,9066,10028,11023,11024,8984,9498,544,9669,71,165,166,151,441,10023,442,538,9943,11027,11026,130,8972,9296,9441,9134,11157,
+            #10282,10084,10167,10654,10699,10342,161,9122,10343,339,11031,10737,9088,9628,116,9166
     ]
     
     for league_idx, league_id in enumerate(popular_league_ids, 1):
@@ -595,14 +600,14 @@ if __name__ == "__main__":
         description="Football Stats Pipeline - Fetch and store football statistics",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-    python pipeline.py                     # Default: resume from where it stopped
-    python pipeline.py --no-json           # Skip JSON files (faster, production mode)
-    python pipeline.py --status            # Show pipeline progress status
-    python pipeline.py --force             # Force re-process all (ignore checkpoints)
-    python pipeline.py --retry-failed      # Only retry previously failed matches
-    python pipeline.py --league-limit 2    # Process only first 2 leagues (testing)
-    python pipeline.py --build-players     # Build player profiles after ingestion
+            Examples:
+                python pipeline.py                     # Default: resume from where it stopped
+                python pipeline.py --no-json           # Skip JSON files (faster, production mode)
+                python pipeline.py --status            # Show pipeline progress status
+                python pipeline.py --force             # Force re-process all (ignore checkpoints)
+                python pipeline.py --retry-failed      # Only retry previously failed matches
+                python pipeline.py --league-limit 2    # Process only first 2 leagues (testing)
+                python pipeline.py --build-players     # Build player profiles after ingestion
         """
     )
     
