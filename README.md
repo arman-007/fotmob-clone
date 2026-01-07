@@ -39,6 +39,13 @@ The Football Stats Pipeline is a comprehensive data ingestion system with **two 
 
 Both pipelines share the same MongoDB schema and modules, ensuring data consistency.
 
+### Key Design Principles
+
+- **Integer IDs**: All IDs (league, match, player, team) are stored as **integers** for consistency and query performance
+- **In-Memory Data Flow**: Data is passed in-memory between functions - no file reads required
+- **True `--no-json`**: When disabled, absolutely no JSON files are created
+- **MongoDB First**: MongoDB is the primary data store; JSON is optional for debugging
+
 ### Use Cases
 
 - Building Fantasy Football applications
@@ -57,6 +64,7 @@ Both pipelines share the same MongoDB schema and modules, ensuring data consiste
 | Feature | Description |
 |---------|-------------|
 | **Multi-League Support** | Fetches data from 500+ leagues worldwide |
+| **League Source Selection** | Choose popular, international, countries, or all leagues |
 | **Historical Data** | Retrieves up to 10 seasons per league |
 | **Daily Updates** | Incremental updates for current matches |
 | **Player Statistics** | Comprehensive stats including goals, assists, ratings, cards |
@@ -69,13 +77,15 @@ Both pipelines share the same MongoDB schema and modules, ensuring data consiste
 |---------|:----------:|:-----:|
 | Checkpoint/Resume | ✅ | - |
 | Failed Match Retry | ✅ | - |
+| League Source Selection | ✅ | - |
 | League Filtering | ✅ | ✅ |
+| Skip Specific Leagues | ✅ | - |
 | Date Selection | - | ✅ |
 | Match Status Filtering | - | ✅ |
 | Dry Run Mode | - | ✅ |
 | Safe Updates | - | ✅ |
 | Progress Tracking | ✅ | ✅ |
-| Dual Storage (JSON + MongoDB) | ✅ | ✅ |
+| Optional JSON Output | ✅ | ✅ |
 
 ### Query Features
 
@@ -125,42 +135,46 @@ Both pipelines share the same MongoDB schema and modules, ensuring data consiste
         └──────────────┘          └──────────────┘
 ```
 
-### Data Flow - Historical Pipeline
+### In-Memory Data Flow
+
+The pipeline uses an **in-memory data flow** pattern - no intermediate file reads required:
 
 ```
-1. Capture X-MAS Token ──► Authentication for API requests
-           │
-           ▼
-2. Fetch All Leagues ────► 537 leagues from 200+ countries
-           │
-           ▼
-3. For Each League:
-   ├── Fetch Season Data ──► Last 10 seasons
-   │          │
-   │          ▼
-   └── For Each Season:
-       ├── Get Match IDs ──► 380+ matches per season
-       │          │
-       │          ▼
-       └── For Each Match:
-           └── Fetch Player Stats ──► 22+ players per match
+┌─────────────────────────────────────────────────────────────────┐
+│                    IN-MEMORY DATA FLOW                          │
+└─────────────────────────────────────────────────────────────────┘
+
+1. Fetch Leagues (API)
+        │
+        ▼
+   ┌─────────────┐
+   │ In-Memory   │──────► MongoDB (always)
+   │ leagues_data│──────► JSON (optional)
+   └─────────────┘
+        │
+        ▼ Returns league IDs directly (no file read)
+
+2. Fetch Season Data (API)
+        │
+        ▼
+   ┌─────────────┐
+   │ In-Memory   │──────► MongoDB (always)
+   │ season_data │──────► JSON (optional)
+   │ + match_ids │
+   └─────────────┘
+        │
+        ▼ Returns match IDs directly (no file read)
+
+3. Process Matches (API)
+        │
+        ▼
+   ┌─────────────┐
+   │ In-Memory   │──────► MongoDB (always)
+   │ match_stats │──────► JSON (optional)
+   └─────────────┘
 ```
 
-### Data Flow - Daily Pipeline
-
-```
-1. Capture X-MAS Token ──► Authentication
-           │
-           ▼
-2. Fetch Matches by Date ──► All matches for specified date
-           │
-           ▼
-3. Filter Matches ──► By status (finished/started) and league
-           │
-           ▼
-4. For Each Match:
-   └── Fetch & Save Player Stats ──► Safe update to MongoDB
-```
+This means `--no-json` **truly** creates zero JSON files.
 
 ---
 
@@ -283,8 +297,17 @@ The historical pipeline (`pipeline.py`) is designed for **bulk data ingestion** 
 #### Basic Commands
 
 ```bash
-# Run pipeline with default settings (JSON + MongoDB)
+# Run pipeline - process ALL leagues (default)
 python pipeline.py
+
+# Process only popular leagues
+python pipeline.py --source popular
+
+# Process all country leagues
+python pipeline.py --source countries
+
+# Process international competitions only
+python pipeline.py --source international
 
 # Check pipeline progress
 python pipeline.py --status
@@ -294,6 +317,9 @@ python pipeline.py --no-json
 
 # Process limited leagues (for testing)
 python pipeline.py --league-limit 2
+
+# Skip specific problematic leagues
+python pipeline.py --skip-leagues 10913,285,9173
 
 # Force re-process all data (ignore checkpoints)
 python pipeline.py --force
@@ -309,23 +335,43 @@ python pipeline.py --build-players
 
 | Flag | Description | Default |
 |------|-------------|---------|
+| `--source` | League source: `popular`, `international`, `countries`, `all` | `all` |
 | `--no-json` | Skip saving JSON files (faster) | `False` |
 | `--no-mongodb` | Skip MongoDB, JSON only (debugging) | `False` |
 | `--league-limit N` | Process only first N leagues | All leagues |
+| `--skip-leagues` | Comma-separated league IDs to skip | None |
 | `--force` | Ignore checkpoints, re-process all | `False` |
 | `--retry-failed` | Only retry previously failed matches | `False` |
 | `--status` | Show progress status and exit | - |
 | `--build-players` | Build aggregated player profiles | `False` |
 | `-d, --date` | Date parameter (YYYYMMDD) | Today |
 
+#### League Source Options
+
+| Source | Description | Typical Count |
+|--------|-------------|---------------|
+| `popular` | Top leagues (Premier League, La Liga, etc.) | ~20 leagues |
+| `international` | International competitions (World Cup, Euros, etc.) | ~30 leagues |
+| `countries` | All domestic leagues from all countries | ~500 leagues |
+| `all` | Everything combined | ~550 leagues |
+
 #### Example Workflows
 
 ```bash
-# Initial setup: Full historical data load
+# Initial setup: Full historical data load (all leagues)
 python pipeline.py --no-json
 
-# Development: Test with 2 leagues
-python pipeline.py --league-limit 2
+# Quick test: Just popular leagues, 2 only
+python pipeline.py --source popular --league-limit 2
+
+# Production: All country leagues, no JSON
+python pipeline.py --source countries --no-json
+
+# International tournaments only
+python pipeline.py --source international
+
+# Skip problematic leagues that cause errors
+python pipeline.py --skip-leagues 10913,285,9173,10175
 
 # Resume after interruption (automatic)
 python pipeline.py
@@ -412,16 +458,8 @@ python daily_pipeline.py --match-limit 10 -v
 
 #### Flag Details
 
-##### `-d, --date`
-Specify the date to fetch matches for in `YYYYMMDD` format.
-
-```bash
-python daily_pipeline.py -d 20241225  # Christmas Day matches
-python daily_pipeline.py --date 20240101  # New Year's Day
-```
-
 ##### `--leagues`
-Filter matches by specific league IDs. Useful for focusing on specific competitions.
+Filter matches by specific league IDs (integers). Useful for focusing on specific competitions.
 
 ```bash
 # Premier League only
@@ -437,22 +475,6 @@ python daily_pipeline.py --leagues 47,87,54,53
 #   53  = Serie A (Italy)
 #   55  = Ligue 1 (France)
 #   42  = Champions League
-```
-
-##### `--finished-only`
-Only process matches that have finished. Useful for ensuring complete player statistics.
-
-```bash
-# End of day run - only completed matches
-python daily_pipeline.py --finished-only
-```
-
-##### `--started-only`
-Only process matches that have started (includes in-progress and finished). Skips scheduled matches.
-
-```bash
-# During match day - get live/completed stats
-python daily_pipeline.py --started-only
 ```
 
 ##### `--dry-run`
@@ -501,29 +523,6 @@ DAILY MATCH STATUS FOR 20241215
 ============================================================
 ```
 
-##### `--force`
-Bypass safety checks and force update existing records. Use with caution.
-
-```bash
-# Re-process all matches for a date, overwriting existing data
-python daily_pipeline.py -d 20241215 --force
-```
-
-##### `--match-limit`
-Limit the number of matches to process. Useful for testing.
-
-```bash
-# Test with just 5 matches
-python daily_pipeline.py --match-limit 5 -v
-```
-
-##### `-v, --verbose`
-Enable debug-level logging for troubleshooting.
-
-```bash
-python daily_pipeline.py -v
-```
-
 #### Example Workflows
 
 ```bash
@@ -543,38 +542,6 @@ python daily_pipeline.py --leagues 47 --finished-only
 python daily_pipeline.py --match-limit 5 --dry-run -v
 ```
 
-#### Output Example
-
-```
-============================================================
-DAILY PIPELINE COMPLETE
-============================================================
-Date: 20241215
-Total matches found: 128
-Matches processed: 100
-Matches skipped: 25
-Matches failed: 3
-
-⏭️  Skipped Matches (25):
-
-   Not Finished (25):
-     - 4813590 (Premier League)
-     - 4813591 (La Liga)
-     - 4813592 (Bundesliga)
-     ... and 22 more
-
-❌ Failed Matches (3):
-   - 4813580 (Champions League): No data returned from API
-   - 4813581 (Europa League): Failed to process response
-   - 4813582 (MLS): Connection timeout
-
-MongoDB - Matches saved: 100
-MongoDB - Player stats saved: 2245
-
-Duration: 125.34 seconds
-============================================================
-```
-
 #### Cron Job Setup
 
 ```bash
@@ -592,17 +559,31 @@ crontab -e
 
 ## 🗄️ Database Schema
 
+### ID Types
+
+> **Important**: All IDs are stored as **integers** for consistency and query performance.
+
+| Field | Type | Example |
+|-------|------|---------|
+| `league_id` | `int` | `47` |
+| `match_id` | `int` | `4521342` |
+| `player_id` | `int` | `961995` |
+| `team_id` | `int` | `8650` |
+| `season_id` | `string` | `"2024-2025"` |
+| `league_season_key` | `string` | `"47_2024-2025"` |
+| `player_match_key` | `string` | `"961995_4521342"` |
+
 ### Collections Overview
 
 | Collection | Purpose | Key Fields |
 |------------|---------|------------|
-| `leagues` | League metadata | `league_id`, `name`, `country_code` |
-| `seasons` | Season information | `league_season_key`, `league_id`, `season_id` |
-| `matches` | Match details with embedded player stats | `match_id`, `home_team`, `away_team`, `player_stats` |
-| `player_stats` | Flattened per-match player stats | `player_match_key`, `player_id`, `match_id` |
-| `players` | Aggregated player profiles | `player_id`, `total_goals`, `total_assists` |
-| `teams` | Team information | `team_id`, `name` |
-| `pipeline_state` | Historical pipeline checkpoints | `league_id`, `season_id`, `status` |
+| `leagues` | League metadata | `league_id` (int), `name`, `country_code` |
+| `seasons` | Season information | `league_season_key`, `league_id` (int), `season_id`, `match_ids` |
+| `matches` | Match details with embedded player stats | `match_id` (int), `home_team`, `away_team`, `player_stats` |
+| `player_stats` | Flattened per-match player stats | `player_match_key`, `player_id` (int), `match_id` (int) |
+| `players` | Aggregated player profiles | `player_id` (int), `total_goals`, `total_assists` |
+| `teams` | Team information | `team_id` (int), `name` |
+| `pipeline_state` | Historical pipeline checkpoints | `league_id` (int), `season_id`, `status` |
 
 ### Sample Documents
 
@@ -610,16 +591,16 @@ crontab -e
 ```javascript
 {
   "player_match_key": "961995_4521342",
-  "player_id": "961995",
+  "player_id": 961995,              // Integer
   "name": "Mohamed Salah",
-  "team_id": "8650",
+  "team_id": 8650,                  // Integer
   "team_name": "Liverpool",
-  "match_id": "4521342",
+  "match_id": 4521342,              // Integer
   "match_datetime_utc": ISODate("2024-12-07T15:00:00Z"),
-  "league_id": "47",
+  "league_id": 47,                  // Integer
   "season_id": "2024-2025",
   "league_season_key": "47_2024-2025",
-  "opponent_team_id": "8455",
+  "opponent_team_id": 8455,         // Integer
   "opponent_team_name": "Everton",
   "is_home": true,
   "goals": 2,
@@ -635,8 +616,8 @@ crontab -e
 #### matches
 ```javascript
 {
-  "match_id": "4521342",
-  "league_id": "47",
+  "match_id": 4521342,              // Integer
+  "league_id": 47,                  // Integer
   "season_id": "2024-2025",
   "league_season_key": "47_2024-2025",
   "match_name": "Liverpool vs Everton",
@@ -644,14 +625,14 @@ crontab -e
   "started": true,
   "finished": true,
   "home_team": {
-    "team_id": "8650",
+    "team_id": 8650,                // Integer
     "name": "Liverpool"
   },
   "away_team": {
-    "team_id": "8455",
+    "team_id": 8455,                // Integer
     "name": "Everton"
   },
-  "player_stats": [...],  // Embedded array
+  "player_stats": [...],            // Embedded array with integer IDs
   "stats_summary": {
     "total_goals": 3,
     "total_yellow_cards": 4,
@@ -660,11 +641,27 @@ crontab -e
 }
 ```
 
+#### seasons
+```javascript
+{
+  "league_id": 47,                  // Integer
+  "season_id": "2024-2025",
+  "league_season_key": "47_2024-2025",
+  "league_name": "Premier League",
+  "country_code": "ENG",
+  "match_ids": [4521342, 4521343, 4521344, ...],  // Integer array
+  "stats_summary": {
+    "total_matches": 380,
+    "completed_matches": 250
+  }
+}
+```
+
 ### Indexes
 
 Optimized indexes are automatically created for:
 
-- Primary key lookups (`league_id`, `match_id`, `player_id`)
+- Primary key lookups (`league_id`, `match_id`, `player_id`) - all integers
 - Composite queries (`league_season_key` + `match_datetime_utc`)
 - Aggregation pipelines (goals, assists, rating)
 - Text search (player names, team names)
@@ -673,7 +670,9 @@ Optimized indexes are automatically created for:
 
 ## 🔍 Query Helpers API
 
-The `QueryHelpers` class provides ready-to-use methods for your application:
+The `QueryHelpers` class provides ready-to-use methods for your application.
+
+> **Note**: All ID parameters should be **integers**.
 
 ### Usage
 
@@ -691,68 +690,68 @@ queries = QueryHelpers()
 # Get all leagues
 leagues = queries.get_all_leagues(category="popular")
 
-# Get single league
-league = queries.get_league_by_id("47")
+# Get single league (integer ID)
+league = queries.get_league_by_id(47)
 
 # Get seasons for a league
-seasons = queries.get_league_seasons("47")
+seasons = queries.get_league_seasons(47)
 ```
 
 #### Match Queries
 
 ```python
 # Get matches for league/season
-matches = queries.get_matches_for_league_season("47", "2024-2025", finished_only=True)
+matches = queries.get_matches_for_league_season(47, "2024-2025", finished_only=True)
 
-# Get single match with player stats
-match = queries.get_match_by_id("4521342", include_player_stats=True)
+# Get single match with player stats (integer ID)
+match = queries.get_match_by_id(4521342, include_player_stats=True)
 
 # Get recent matches
-recent = queries.get_recent_matches(league_id="47", days=7, limit=20)
+recent = queries.get_recent_matches(league_id=47, days=7, limit=20)
 
-# Get team matches
-team_matches = queries.get_team_matches("8650", league_season_key="47_2024-2025")
+# Get team matches (integer team ID)
+team_matches = queries.get_team_matches(8650, league_season_key="47_2024-2025")
 ```
 
 #### Player Stats Queries
 
 ```python
-# Get player stats
-stats = queries.get_player_stats("961995", league_season_key="47_2024-2025")
+# Get player stats (integer player ID)
+stats = queries.get_player_stats(961995, league_season_key="47_2024-2025")
 
 # Get player form (last N matches)
-form = queries.get_player_form("961995", matches=5)
+form = queries.get_player_form(961995, matches=5)
 
 # Get top scorers
-top_scorers = queries.get_top_scorers("47", "2024-2025", limit=20)
+top_scorers = queries.get_top_scorers(47, "2024-2025", limit=20)
 
 # Get top assists
-top_assists = queries.get_top_assists("47", "2024-2025", limit=20)
+top_assists = queries.get_top_assists(47, "2024-2025", limit=20)
 
 # Get top rated players
-top_rated = queries.get_top_rated_players("47", "2024-2025", min_matches=5, limit=20)
+top_rated = queries.get_top_rated_players(47, "2024-2025", min_matches=5, limit=20)
 
-# Compare players
+# Compare players (integer IDs)
 comparison = queries.compare_players(
-    player_ids=["961995", "237079"],
+    player_ids=[961995, 237079],
     league_season_key="47_2024-2025"
 )
 
 # Get player season summary
-summary = queries.get_player_season_summary("961995", "47_2024-2025")
+summary = queries.get_player_season_summary(961995, "47_2024-2025")
 ```
 
 #### Team Queries
 
 ```python
-# Get team by ID
-team = queries.get_team_by_id("8650")
+# Get team by ID (integer)
+team = queries.get_team_by_id(8650)
 
 # Get team players with stats
-players = queries.get_team_players("8650", "47_2024-2025")
+players = queries.get_team_players(8650, "47_2024-2025")
 
 # Get team season stats
-team_stats = queries.get_team_season_stats("8650", "47_2024-2025")
+team_stats = queries.get_team_season_stats(8650, "47_2024-2025")
 ```
 
 #### Search Queries
@@ -782,10 +781,10 @@ football-stats-pipeline/
 │
 ├── service/                  # API interaction modules
 │   ├── __init__.py
-│   ├── get_auth_headers.py   # X-MAS token capture
-│   ├── get_leagues.py        # League fetching
-│   ├── get_specific_league.py    # Season data fetching
-│   ├── get_player_stats.py       # Player stats (historical)
+│   ├── get_auth_headers.py       # X-MAS token capture
+│   ├── get_leagues.py            # League fetching (returns in-memory)
+│   ├── get_specific_league.py    # Season data fetching (returns match IDs in-memory)
+│   ├── get_player_stats.py       # Player stats (accepts league_id, season_id directly)
 │   ├── get_daily_matches.py      # Daily match fetching
 │   └── match_stats_processor.py  # Shared match processing
 │
@@ -798,14 +797,14 @@ football-stats-pipeline/
 │
 ├── utils/                    # Utility modules
 │   ├── __init__.py
-│   ├── get_all_season_match_ids.py  # Match ID extraction
 │   └── get_timezone.py       # Timezone utilities
 │
 ├── logs/                     # Log files
 │   ├── pipeline_log.txt      # Historical pipeline logs
 │   └── daily_pipeline.log    # Daily pipeline logs
 │
-└── output/                   # JSON output (optional)
+└── output/                   # JSON output (optional, only with --no-json disabled)
+    ├── leagues_data.json     # All leagues
     ├── leagues/              # Historical data
     │   └── {league_id}/
     │       └── {season}/
@@ -813,10 +812,7 @@ football-stats-pipeline/
     │           └── player_stats/
     │               └── player_stats_matchID_*.json
     └── daily/                # Daily data
-        └── {date}/
-            ├── matches_{date}.json
-            └── player_stats/
-                └── match_{match_id}.json
+        └── matches_{date}.json
 ```
 
 ---
@@ -893,6 +889,19 @@ python daily_pipeline.py -d 20241215
 ```bash
 # Use --force to override (use with caution)
 python daily_pipeline.py -d 20241215 --force
+```
+
+#### 6. ID Type Mismatch
+
+**Cause**: Querying with string IDs instead of integers
+
+**Solution**:
+```python
+# Wrong
+queries.get_league_by_id("47")
+
+# Correct
+queries.get_league_by_id(47)
 ```
 
 ### Logs
