@@ -83,7 +83,6 @@ import argparse
 import logging
 import time
 import os
-import glob
 import sys
 from datetime import datetime
 from datetime import timezone
@@ -94,7 +93,6 @@ from service.get_auth_headers import capture_x_mas
 from service.get_leagues import get_all_leagues
 from service.get_specific_league import get_specific_league_data
 from service.get_player_stats import get_match_wise_player_stats
-from utils.get_all_season_match_ids import get_all_match_ids
 
 # MongoDB imports - wrapped in try/except for when running without MongoDB
 try:
@@ -528,39 +526,33 @@ def run_pipeline(
     for league_idx, league_id in enumerate(league_ids, 1):
         logger.info(f"{'='*30} Processing League {league_idx}/{len(league_ids)}: {league_id} {'='*30}")
         
-        # Fetch league/season data - pass the X-MAS token
-        season_data = get_specific_league_data(
-            league_id,  # Now int
+        # Fetch league/season data - returns in-memory data with match IDs
+        league_data_result = get_specific_league_data(
+            league_id,  # int
             x_mas=x_mas_token,
             save_to_json=save_to_json,
             save_to_mongodb=save_to_mongodb
         )
         
-        if not season_data:
+        if not league_data_result or not league_data_result.get("seasons"):
             logger.warning(f"Failed to fetch season data for league {league_id}")
             continue
         
-        # Find all season JSON files for this league
-        season_files_paths = glob.glob(
-            f"output/leagues/{league_id}/**/league_info_*.json",
-            recursive=True
-        )
-        
-        logger.info(f"Found {len(season_files_paths)} season files for league {league_id}")
+        seasons = league_data_result["seasons"]
+        logger.info(f"Found {len(seasons)} seasons for league {league_id}")
         
         # =====================================================================
-        # Step 3: Process each season
+        # Step 3: Process each season (using in-memory data)
         # =====================================================================
-        for season_file_path in season_files_paths:
-            # Extract season_id from path
-            from db import extract_season_from_path
-            season_id = extract_season_from_path(season_file_path)
+        for season_id, season_info in seasons.items():
+            # Get match IDs directly from in-memory data (no file read!)
+            all_match_ids = season_info.get("match_ids", [])
             
-            if not season_id:
-                logger.warning(f"Could not extract season_id from {season_file_path}")
+            if not all_match_ids:
+                logger.warning(f"No match IDs found for {league_id}_{season_id}")
                 continue
             
-            logger.info(f"Processing season: {league_id}_{season_id}")
+            logger.info(f"Processing season: {league_id}_{season_id} ({len(all_match_ids)} matches)")
             
             # =================================================================
             # Check if season should be processed (checkpoint/resume)
@@ -589,13 +581,6 @@ def run_pipeline(
                 continue
             
             logger.info(f"✅ X-MAS token refreshed: {x_mas_token[:30]}...")
-            
-            # Get match IDs for this season
-            all_match_ids = get_all_match_ids(season_file_path)
-            
-            if not all_match_ids:
-                logger.warning(f"No match IDs found in {season_file_path}")
-                continue
             
             # Determine which matches to process
             if matches_to_retry:
@@ -631,7 +616,7 @@ def run_pipeline(
             season_failed = 0
             
             for match_idx, match_id in enumerate(match_ids, 1):
-                # match_id is already int from get_all_match_ids
+                # match_id is already int from in-memory data
                 
                 # Skip if already processed (unless force)
                 if state_manager and not force and not matches_to_retry:
@@ -642,8 +627,9 @@ def run_pipeline(
                 try:
                     result = get_match_wise_player_stats(
                         x_mas=x_mas_token,
-                        match_id=match_id,  # Now int
-                        season_file_path=season_file_path,
+                        match_id=match_id,  # int
+                        league_id=league_id,  # int - pass directly
+                        season_id=season_id,  # str
                         save_to_json=save_to_json,
                         save_to_mongodb=save_to_mongodb
                     )
