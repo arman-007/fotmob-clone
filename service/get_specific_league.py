@@ -5,6 +5,9 @@ Fetches league-specific data including seasons from FotMob API and stores in:
 1. JSON files (for debugging/backup)
 2. MongoDB (primary storage)
 
+Updated: Integer IDs version
+- league_id is now stored as int
+
 The JSON saving is kept for debugging purposes but can be commented out.
 """
 
@@ -30,6 +33,16 @@ logger = logging.getLogger(__name__)
 URL = os.environ.get("URL")
 
 
+def _safe_int(value, default=None):
+    """Safely convert value to int."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
 def _write_data_to_json(data: dict, filepath: str) -> None:
     """
     Write data to JSON file.
@@ -39,14 +52,14 @@ def _write_data_to_json(data: dict, filepath: str) -> None:
     try:
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
+            json.dump(data, f, indent=4, default=str)
         logger.debug(f"Saved response to {filepath}")
     except IOError as e:
         logger.error(f"Failed to write JSON to {filepath}: {e}")
 
 
 def _save_season_to_mongodb(
-    league_id: str,
+    league_id: int,  # Now int
     season_id: str,
     data: dict,
     all_seasons: list
@@ -55,7 +68,7 @@ def _save_season_to_mongodb(
     Save season data to MongoDB.
     
     Args:
-        league_id: League ID
+        league_id: League ID (int)
         season_id: Season ID (e.g., "2024/25" or "2024-25")
         data: Raw API response data
         all_seasons: List of all available seasons
@@ -75,7 +88,7 @@ def _save_season_to_mongodb(
     all_matches = fixtures.get("allMatches", [])
     
     season_doc = {
-        "league_id": str(league_id),
+        "league_id": league_id,  # Now int
         "season_id": normalized_season_id,
         "league_season_key": league_season_key,
         "league_name": details.get("name", ""),
@@ -97,7 +110,7 @@ def _save_season_to_mongodb(
     # Update league with season info
     try:
         mongo.leagues.update_one(
-            {"league_id": str(league_id)},
+            {"league_id": league_id},  # Now int
             {
                 "$addToSet": {
                     "seasons": {
@@ -115,7 +128,7 @@ def _save_season_to_mongodb(
 
 
 def get_specific_league_data(
-    league_id: str,
+    league_id: int,  # Now expects int (or will convert)
     x_mas: str = None,
     save_to_json: bool = True,
     save_to_mongodb: bool = True
@@ -124,7 +137,7 @@ def get_specific_league_data(
     Fetch league-specific data including all seasons.
     
     Args:
-        league_id: League ID to fetch
+        league_id: League ID to fetch (int or string, will be converted to int)
         x_mas: Optional X-MAS token (will be captured if not provided)
         save_to_json: Whether to save to JSON files (default: True for debugging)
         save_to_mongodb: Whether to save to MongoDB (default: True)
@@ -132,6 +145,12 @@ def get_specific_league_data(
     Returns:
         Latest season data or None on failure
     """
+    # Ensure league_id is int
+    league_id = _safe_int(league_id)
+    if league_id is None:
+        logger.error(f"Invalid league_id provided")
+        return None
+    
     url = f"{URL}/leagues"
     
     # Get fresh X-MAS token if not provided
@@ -237,5 +256,5 @@ if __name__ == "__main__":
     mongo = get_mongodb_service()
     mongo.connect()
     
-    test_league_id = "47"  # Premier League
+    test_league_id = 47  # Premier League (now int)
     get_specific_league_data(test_league_id, save_to_json=True, save_to_mongodb=True)

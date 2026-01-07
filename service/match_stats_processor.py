@@ -10,13 +10,16 @@ This module contains:
 - MongoDB save operations with safety checks
 
 The processing logic is shared to ensure consistency between pipelines.
+
+NOTE: All IDs (match_id, league_id, team_id, player_id) are stored as INTEGERS
+in MongoDB for consistency and query performance.
 """
 
 import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Union
 
 import requests
 from dotenv import load_dotenv
@@ -45,11 +48,14 @@ except ImportError:
                 continue
         return None
     
-    def safe_int(value, default=0):
+    def safe_int(value, default=None):
+        """Safely convert value to int."""
         if value is None:
             return default
+        if isinstance(value, int):
+            return value
         try:
-            return int(value)
+            return int(str(value).strip())
         except (ValueError, TypeError):
             return default
     
@@ -72,13 +78,13 @@ URL = os.environ.get("URL")
 # API Request Functions
 # =============================================================================
 
-def fetch_match_details(x_mas: str, match_id: str) -> Optional[dict]:
+def fetch_match_details(x_mas: str, match_id: Union[int, str]) -> Optional[dict]:
     """
     Fetch match details from FotMob API.
     
     Args:
         x_mas: X-MAS authentication token
-        match_id: Match ID to fetch
+        match_id: Match ID to fetch (int or str)
         
     Returns:
         Raw API response dict or None on failure
@@ -92,7 +98,7 @@ def fetch_match_details(x_mas: str, match_id: str) -> Optional[dict]:
         return None
     
     url = f"{URL}/matchDetails"
-    params = {'matchId': match_id}
+    params = {'matchId': match_id}  # API accepts both int and str
     
     headers = {
         'accept': '*/*',
@@ -133,22 +139,22 @@ def process_general_section(general_data: dict) -> dict:
         general_data: The 'general' section from API response
         
     Returns:
-        Processed match info dict
+        Processed match info dict with integer IDs
     """
     home_team = general_data.get("homeTeam", {})
     away_team = general_data.get("awayTeam", {})
     
     return {
-        "match_id": general_data.get("matchId"),
+        "match_id": safe_int(general_data.get("matchId")),
         "match_name": general_data.get("matchName"),
-        "league_id": general_data.get("parentLeagueId"),
+        "league_id": safe_int(general_data.get("parentLeagueId")),
         "league_name": general_data.get("leagueName"),
         "match_date_time_UTC": general_data.get("matchTimeUTCDate"),
         "started": general_data.get("started"),
         "finished": general_data.get("finished"),
-        "home_team_id": home_team.get("id"),
+        "home_team_id": safe_int(home_team.get("id")),
         "home_team_name": home_team.get("name"),
-        "away_team_id": away_team.get("id"),
+        "away_team_id": safe_int(away_team.get("id")),
         "away_team_name": away_team.get("name"),
     }
 
@@ -204,12 +210,12 @@ def process_individual_player(player_stats: dict) -> dict:
         player_stats: Player stats dict from API
         
     Returns:
-        Processed player stats dict
+        Processed player stats dict with integer IDs
     """
     stats = {
         "name": player_stats.get("name"),
-        "player_fotmob_id": player_stats.get("id"),
-        "player_team_id": player_stats.get("teamId"),
+        "player_fotmob_id": safe_int(player_stats.get("id")),
+        "player_team_id": safe_int(player_stats.get("teamId")),
         "player_team_name": player_stats.get("teamName"),
         "isGoalkeeper": player_stats.get("isGoalkeeper"),
     }
@@ -250,12 +256,13 @@ def process_content_section(content_data: dict) -> List[dict]:
 
     # Get additional stats (yellow cards, goals, etc.)
     additional_stats = process_additional_stats(content_data.get("matchFacts", {}))
-    additional_stats = {str(k): v for k, v in additional_stats.items()}
+    # Convert keys to int for matching
+    additional_stats = {safe_int(k): v for k, v in additional_stats.items()}
 
     # Merge additional stats into player stats
     for player in player_stats:
-        player_id = str(player.get("player_fotmob_id"))
-        if player_id in additional_stats:
+        player_id = player.get("player_fotmob_id")
+        if player_id and player_id in additional_stats:
             for new_stats in additional_stats[player_id]:
                 player.update(new_stats)
     
@@ -292,7 +299,7 @@ def process_match_response(response_data: Optional[dict]) -> dict:
 
 def save_match_to_mongodb(
     match_data: dict,
-    league_id: str = None,
+    league_id: Union[int, str] = None,
     season_id: str = None,
     safe_update: bool = True
 ) -> Tuple[bool, Dict[str, int]]:
@@ -303,6 +310,8 @@ def save_match_to_mongodb(
     - Won't overwrite existing player_stats with empty data
     - Only updates fields that have meaningful values
     - Preserves existing data if new data is incomplete
+    
+    All IDs are stored as integers for consistency.
     
     Args:
         match_data: Processed match data dictionary
@@ -325,10 +334,14 @@ def save_match_to_mongodb(
         logger.warning("Empty or invalid match data, skipping MongoDB save")
         return False, stats
     
-    match_id = str(match_data["match_id"])
+    # Convert all IDs to integers
+    match_id = safe_int(match_data["match_id"])
+    if not match_id:
+        logger.warning(f"Invalid match_id: {match_data.get('match_id')}")
+        return False, stats
     
     # Extract or use provided league/season info
-    league_id = str(league_id or match_data.get("league_id", ""))
+    league_id = safe_int(league_id) or safe_int(match_data.get("league_id"))
     
     # For daily pipeline, we may not have season_id - try to determine it
     if not season_id:
@@ -338,9 +351,9 @@ def save_match_to_mongodb(
     
     match_datetime = parse_datetime(match_data.get("match_date_time_UTC"))
     
-    # Extract team info
-    home_team_id = str(match_data.get("home_team_id", ""))
-    away_team_id = str(match_data.get("away_team_id", ""))
+    # Extract team info as integers
+    home_team_id = safe_int(match_data.get("home_team_id"))
+    away_team_id = safe_int(match_data.get("away_team_id"))
     home_team_name = match_data.get("home_team_name", "")
     away_team_name = match_data.get("away_team_name", "")
     
@@ -382,22 +395,22 @@ def save_match_to_mongodb(
     match_red_cards = 0
     
     for ps in raw_player_stats:
-        player_id = str(ps.get("player_fotmob_id", ""))
+        player_id = safe_int(ps.get("player_fotmob_id"))
         if not player_id:
             continue
         
-        player_team_id = str(ps.get("player_team_id", ""))
+        player_team_id = safe_int(ps.get("player_team_id"))
         is_home = player_team_id == home_team_id
         opponent_team_id = away_team_id if is_home else home_team_id
         opponent_team_name = away_team_name if is_home else home_team_name
         
         # Extract stats safely
-        goals = safe_int(ps.get("goals", 0))
-        assists = safe_int(ps.get("assists", 0))
+        goals = safe_int(ps.get("goals"), 0)
+        assists = safe_int(ps.get("assists"), 0)
         yellow_card = bool(ps.get("yellow_card", False))
         red_card = bool(ps.get("red_card", False))
         rating = safe_float(ps.get("rating"))
-        minutes_played = safe_int(ps.get("minutes_played", 0))
+        minutes_played = safe_int(ps.get("minutes_played"), 0)
         
         # Aggregate match stats
         match_goals += goals
@@ -406,9 +419,9 @@ def save_match_to_mongodb(
         
         # Build embedded player stat (for matches collection)
         embedded_stat = {
-            "player_id": player_id,
+            "player_id": player_id,  # int
             "name": ps.get("name", ""),
-            "team_id": player_team_id,
+            "team_id": player_team_id,  # int
             "team_name": ps.get("player_team_name", ""),
             "is_goalkeeper": ps.get("isGoalkeeper", False),
             "goals": goals,
@@ -434,18 +447,18 @@ def save_match_to_mongodb(
         
         # Build flattened player stat (for player_stats collection)
         flattened_stat = {
-            "player_match_key": f"{player_id}_{match_id}",
-            "player_id": player_id,
+            "player_match_key": f"{player_id}_{match_id}",  # string key for uniqueness
+            "player_id": player_id,  # int
             "name": ps.get("name", ""),
-            "team_id": player_team_id,
+            "team_id": player_team_id,  # int
             "team_name": ps.get("player_team_name", ""),
             "is_goalkeeper": ps.get("isGoalkeeper", False),
-            "match_id": match_id,
+            "match_id": match_id,  # int
             "match_datetime_utc": match_datetime,
-            "league_id": league_id,
+            "league_id": league_id,  # int
             "season_id": season_id,
             "league_season_key": league_season_key,
-            "opponent_team_id": opponent_team_id,
+            "opponent_team_id": opponent_team_id,  # int
             "opponent_team_name": opponent_team_name,
             "is_home": is_home,
             "goals": goals,
@@ -465,8 +478,8 @@ def save_match_to_mongodb(
     
     # Build match document
     match_doc = {
-        "match_id": match_id,
-        "league_id": league_id,
+        "match_id": match_id,  # int
+        "league_id": league_id,  # int
         "season_id": season_id,
         "league_season_key": league_season_key,
         "match_name": match_data.get("match_name", ""),
@@ -474,11 +487,11 @@ def save_match_to_mongodb(
         "started": match_data.get("started", False),
         "finished": match_data.get("finished", False),
         "home_team": {
-            "team_id": home_team_id,
+            "team_id": home_team_id,  # int
             "name": home_team_name
         },
         "away_team": {
-            "team_id": away_team_id,
+            "team_id": away_team_id,  # int
             "name": away_team_name
         },
         "player_stats": embedded_player_stats,
@@ -520,7 +533,7 @@ def save_match_to_mongodb(
         return False, stats
 
 
-def _update_match_metadata_only(mongo, match_id: str, match_data: dict) -> None:
+def _update_match_metadata_only(mongo, match_id: int, match_data: dict) -> None:
     """
     Update only match metadata (status, timestamps) without touching player_stats.
     Used when safety check prevents full update.
@@ -585,7 +598,7 @@ def _determine_season_from_date(date_string: str) -> str:
 
 def save_match_to_json(
     match_data: dict,
-    match_id: str,
+    match_id: Union[int, str],
     output_dir: str = "output/daily/player_stats"
 ) -> None:
     """
@@ -603,7 +616,7 @@ def save_match_to_json(
         filepath = os.path.join(output_dir, filename)
         
         with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(match_data, f, indent=4)
+            json.dump(match_data, f, indent=4, default=str)
         
         logger.debug(f"✅ Saved to {filepath}")
         

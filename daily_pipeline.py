@@ -6,12 +6,12 @@ Fetches and stores daily match data and player statistics for incremental update
 Designed to run once per day (typically end of day) to capture all completed matches.
 
 Features:
-- Fetches all matches for a specific date (default: today)
-- Optional league filtering
-- Saves to MongoDB (same collections as historical pipeline)
-- Safe updates: won't overwrite existing data with empty responses
-- Optional JSON output for debugging
-- Token refresh every 35-40 matches
+    - Fetches all matches for a specific date (default: today)
+    - Optional league filtering
+    - Saves to MongoDB (same collections as historical pipeline)
+    - Safe updates: won't overwrite existing data with empty responses
+    - Optional JSON output for debugging
+    - Token refresh every 35-40 matches
 
 Usage:
     python daily_pipeline.py                          # Fetch today's matches
@@ -23,18 +23,41 @@ Usage:
     python daily_pipeline.py --status                 # Show today's match summary
 
 CLI Flags:
-    -d, --date          Date to fetch (YYYYMMDD format, default: today)
-    --leagues           Comma-separated league IDs to filter (default: all)
-    --no-json           Skip saving JSON files
-    --no-mongodb        Skip saving to MongoDB (JSON only)
-    --finished-only     Only process finished matches
-    --started-only      Only process started matches (includes in-progress)
-    --match-limit       Limit number of matches to process (for testing)
-    --dry-run           Show what would be processed without actually processing
-    --status            Show match summary for the date and exit
-    --force             Force update even if match exists (bypass safety checks)
-    --output-dir        Custom output directory for JSON files
-    -v, --verbose       Enable verbose logging
+    -d, --date DATE         Date to fetch (YYYYMMDD format, default: today)
+    --leagues IDS           Comma-separated league IDs to filter (default: all)
+                            Example: --leagues 47,55,87
+    --no-json               Skip saving JSON files
+    --no-mongodb            Skip saving to MongoDB (JSON only)
+    --finished-only         Only process finished matches
+    --started-only          Only process started matches (includes in-progress)
+    --match-limit N         Limit number of matches to process (for testing)
+    --dry-run               Show what would be processed without actually processing
+    --status                Show match summary for the date and exit
+    --force                 Force update even if match exists (bypass safety checks)
+    --output-dir DIR        Custom output directory for JSON files (default: output/daily)
+    -v, --verbose           Enable verbose/debug logging
+
+Examples:
+    # Fetch all of today's finished matches
+    python daily_pipeline.py --finished-only
+
+    # Fetch matches from a specific date
+    python daily_pipeline.py -d 20241215 --finished-only
+
+    # Only process Premier League (47), La Liga (87), Bundesliga (54)
+    python daily_pipeline.py --leagues 47,87,54 --finished-only
+
+    # Preview what would be processed
+    python daily_pipeline.py --dry-run
+
+    # Check match summary for today
+    python daily_pipeline.py --status
+
+    # Test with 10 matches
+    python daily_pipeline.py --match-limit 10
+
+    # Skip JSON, only save to MongoDB
+    python daily_pipeline.py --no-json --finished-only
 """
 
 import argparse
@@ -44,7 +67,7 @@ import random
 import sys
 import time
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Set
 
 # Add project root to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -65,6 +88,36 @@ try:
 except ImportError:
     MONGODB_AVAILABLE = False
     get_mongodb_service = None
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def safe_int(value, default=None):
+    """Safely convert value to int."""
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (ValueError, TypeError):
+        return default
+
+
+def parse_league_ids(leagues_str: str) -> Optional[List[int]]:
+    """Parse comma-separated league IDs to list of integers."""
+    if not leagues_str:
+        return None
+    
+    league_ids = []
+    for lid in leagues_str.split(","):
+        lid_int = safe_int(lid.strip())
+        if lid_int:
+            league_ids.append(lid_int)
+    
+    return league_ids if league_ids else None
 
 
 # =============================================================================
@@ -139,7 +192,7 @@ def initialize_mongodb() -> bool:
 # Status Display
 # =============================================================================
 
-def show_daily_status(date: str, league_ids: List[str] = None) -> None:
+def show_daily_status(date: str, league_ids: List[int] = None) -> None:
     """
     Display match summary for a given date.
     
@@ -213,7 +266,7 @@ def show_daily_status(date: str, league_ids: List[str] = None) -> None:
 
 def run_daily_pipeline(
     date: str,
-    league_ids: List[str] = None,
+    league_ids: List[int] = None,
     save_to_json: bool = True,
     save_to_mongodb: bool = True,
     finished_only: bool = False,
@@ -228,7 +281,7 @@ def run_daily_pipeline(
     
     Args:
         date: Date string in YYYYMMDD format
-        league_ids: Optional list of league IDs to filter
+        league_ids: Optional list of league IDs to filter (integers)
         save_to_json: Whether to save JSON files
         save_to_mongodb: Whether to save to MongoDB
         finished_only: Only process finished matches
@@ -320,8 +373,12 @@ def run_daily_pipeline(
     
     for match in matches:
         status = match.get("status", {})
-        match_id = match.get("match_id", "unknown")
+        match_id = safe_int(match.get("match_id"))  # Convert to int
         league_name = match.get("league_name", "Unknown")
+        
+        if not match_id:
+            logger.warning(f"Skipping match with invalid ID: {match.get('match_id')}")
+            continue
         
         if finished_only and not status.get("finished"):
             stats["skipped"] += 1
@@ -341,6 +398,8 @@ def run_daily_pipeline(
             })
             continue
         
+        # Ensure match_id is int in the match dict
+        match["match_id"] = match_id
         matches_to_process.append(match)
     
     logger.info(f"Matches to process after filtering: {len(matches_to_process)}")
@@ -373,8 +432,8 @@ def run_daily_pipeline(
     token_refresh_threshold = random.randint(35, 40)
     
     for idx, match in enumerate(matches_to_process, 1):
-        match_id = match["match_id"]
-        league_id = match.get("league_id", "")
+        match_id = match["match_id"]  # Already int
+        league_id = safe_int(match.get("league_id"))  # Convert to int
         
         logger.info(f"[{idx}/{len(matches_to_process)}] Processing match {match_id} ({match.get('league_name', 'Unknown')})")
         
@@ -428,7 +487,7 @@ def run_daily_pipeline(
             if save_to_mongodb:
                 success, mongo_stats = save_match_to_mongodb(
                     match_data=processed_data,
-                    league_id=league_id,
+                    league_id=league_id,  # Now int
                     safe_update=not force_update
                 )
                 
@@ -629,10 +688,8 @@ Examples:
     # Setup logging
     logger = setup_logging(args.verbose)
     
-    # Parse league IDs
-    league_ids = None
-    if args.leagues:
-        league_ids = [lid.strip() for lid in args.leagues.split(",")]
+    # Parse league IDs (now returns List[int])
+    league_ids = parse_league_ids(args.leagues)
     
     # Status mode
     if args.status:

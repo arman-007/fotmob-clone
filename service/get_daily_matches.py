@@ -8,13 +8,15 @@ Features:
 - Fetch all matches for a given date
 - Optional league filtering
 - Save to JSON (optional) and return match data
+
+NOTE: All IDs (match_id, league_id) are stored as INTEGERS for consistency.
 """
 
 import json
 import logging
 import os
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 
 import requests
 from dotenv import load_dotenv
@@ -29,10 +31,22 @@ logger = logging.getLogger(__name__)
 URL = os.environ.get("URL")
 
 
+def safe_int(value, default=None):
+    """Safely convert value to int."""
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (ValueError, TypeError):
+        return default
+
+
 def fetch_matches_by_date(
     date: str,
     x_mas: str = None,
-    league_ids: List[str] = None,
+    league_ids: List[int] = None,
     save_to_json: bool = True,
     output_dir: str = "output/daily"
 ) -> Optional[Dict[str, Any]]:
@@ -42,7 +56,7 @@ def fetch_matches_by_date(
     Args:
         date: Date string in format YYYYMMDD (e.g., "20241215")
         x_mas: Optional X-MAS token (will be captured if not provided)
-        league_ids: Optional list of league IDs to filter (None = all leagues)
+        league_ids: Optional list of league IDs to filter (as integers, None = all leagues)
         save_to_json: Whether to save raw response to JSON file
         output_dir: Directory for JSON output
         
@@ -50,7 +64,7 @@ def fetch_matches_by_date(
         Dictionary containing:
         - raw_data: Original API response
         - matches: List of match info dicts with league context
-        - match_ids: List of match IDs
+        - match_ids: List of match IDs (as integers)
         - leagues: Dict mapping league_id to league info
         
         Returns None on failure.
@@ -140,14 +154,14 @@ def _save_matches_json(data: dict, date: str, output_dir: str) -> None:
 
 def _process_matches_response(
     data: dict,
-    league_ids: List[str] = None
+    league_ids: List[int] = None
 ) -> Dict[str, Any]:
     """
     Process raw API response into structured format.
     
     Args:
         data: Raw API response
-        league_ids: Optional list of league IDs to filter
+        league_ids: Optional list of league IDs to filter (as integers)
         
     Returns:
         Structured dict with matches, match_ids, and leagues
@@ -163,17 +177,23 @@ def _process_matches_response(
         }
     }
     
+    # Convert league_ids to set for faster lookup
+    league_filter = set(league_ids) if league_ids else None
+    
     leagues_data = data.get("leagues", [])
     result["stats"]["total_leagues"] = len(leagues_data)
     
     for league in leagues_data:
-        league_id = str(league.get("id", ""))
+        league_id = safe_int(league.get("id"))
+        if not league_id:
+            continue
+            
         league_name = league.get("name", "Unknown League")
         league_country = league.get("ccode", "")
         
         # Store league info
         result["leagues"][league_id] = {
-            "league_id": league_id,
+            "league_id": league_id,  # int
             "name": league_name,
             "country_code": league_country
         }
@@ -182,18 +202,18 @@ def _process_matches_response(
         result["stats"]["total_matches"] += len(matches_list)
         
         for match in matches_list:
-            match_id = match.get("id")
+            match_id = safe_int(match.get("id"))
             
             if not match_id:
                 continue
             
             # Apply league filter if specified
-            if league_ids and league_id not in league_ids:
+            if league_filter and league_id not in league_filter:
                 continue
             
             match_info = {
-                "match_id": str(match_id),
-                "league_id": league_id,
+                "match_id": match_id,  # int
+                "league_id": league_id,  # int
                 "league_name": league_name,
                 "home_team": match.get("home", {}),
                 "away_team": match.get("away", {}),
@@ -202,7 +222,7 @@ def _process_matches_response(
             }
             
             result["matches"].append(match_info)
-            result["match_ids"].append(str(match_id))
+            result["match_ids"].append(match_id)  # int
     
     result["stats"]["filtered_matches"] = len(result["match_ids"])
     
@@ -212,8 +232,8 @@ def _process_matches_response(
 def get_match_ids_from_json(
     date: str,
     output_dir: str = "output/daily",
-    league_ids: List[str] = None
-) -> Optional[List[str]]:
+    league_ids: List[int] = None
+) -> Optional[List[int]]:
     """
     Load match IDs from a previously saved JSON file.
     
@@ -222,10 +242,10 @@ def get_match_ids_from_json(
     Args:
         date: Date string in format YYYYMMDD
         output_dir: Directory where JSON was saved
-        league_ids: Optional list of league IDs to filter
+        league_ids: Optional list of league IDs to filter (as integers)
         
     Returns:
-        List of match IDs or None if file not found
+        List of match IDs (as integers) or None if file not found
     """
     filepath = f"{output_dir}/matches_{date}.json"
     
@@ -246,7 +266,7 @@ def get_match_ids_from_json(
         return None
 
 
-def get_leagues_from_matches(date: str, output_dir: str = "output/daily") -> Dict[str, dict]:
+def get_leagues_from_matches(date: str, output_dir: str = "output/daily") -> Dict[int, dict]:
     """
     Get league information from saved matches JSON.
     
@@ -255,7 +275,7 @@ def get_leagues_from_matches(date: str, output_dir: str = "output/daily") -> Dic
         output_dir: Directory where JSON was saved
         
     Returns:
-        Dict mapping league_id to league info
+        Dict mapping league_id (int) to league info
     """
     filepath = f"{output_dir}/matches_{date}.json"
     

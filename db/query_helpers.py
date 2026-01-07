@@ -4,21 +4,41 @@ Query Helpers for Football Stats Platform
 Provides high-level query functions for common Fantasy Premier League style queries.
 This module is separate from the pipeline and can be used by the web application.
 
+Updated: Integer IDs version
+- All IDs (league_id, match_id, player_id, team_id) are now integers
+- Removed player_match_key references
+
 Usage:
     from db.query_helpers import QueryHelpers
     
     queries = QueryHelpers()
-    top_scorers = queries.get_top_scorers("47", "2024-25", limit=20)
-    player_stats = queries.get_player_stats("961995", "47_2024-25")
+    top_scorers = queries.get_top_scorers(47, "2024-25", limit=20)
+    player_stats = queries.get_player_stats(961995, "47_2024-25")
 """
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 
 from db.mongodb_service import get_mongodb_service, MongoDBService
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_int(value: Any) -> Optional[int]:
+    """Ensure value is an integer."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    if isinstance(value, float):
+        return int(value)
+    return None
 
 
 class QueryHelpers:
@@ -54,17 +74,25 @@ class QueryHelpers:
             {"_id": 0}
         ).sort("name", 1))
     
-    def get_league_by_id(self, league_id: str) -> Optional[dict]:
+    def get_league_by_id(self, league_id: Union[int, str]) -> Optional[dict]:
         """Get a single league by ID."""
+        league_id_int = _ensure_int(league_id)
+        if league_id_int is None:
+            return None
+        
         return self.mongo.leagues.find_one(
-            {"league_id": str(league_id)},
+            {"league_id": league_id_int},
             {"_id": 0}
         )
     
-    def get_league_seasons(self, league_id: str) -> List[dict]:
+    def get_league_seasons(self, league_id: Union[int, str]) -> List[dict]:
         """Get all seasons for a league."""
+        league_id_int = _ensure_int(league_id)
+        if league_id_int is None:
+            return []
+        
         return list(self.mongo.seasons.find(
-            {"league_id": str(league_id)},
+            {"league_id": league_id_int},
             {"_id": 0}
         ).sort("season_id", -1))
     
@@ -74,7 +102,7 @@ class QueryHelpers:
     
     def get_matches_for_league_season(
         self,
-        league_id: str,
+        league_id: Union[int, str],
         season_id: str,
         finished_only: bool = False,
         limit: int = 100,
@@ -84,7 +112,7 @@ class QueryHelpers:
         Get all matches for a specific league and season.
         
         Args:
-            league_id: League ID
+            league_id: League ID (int or string)
             season_id: Season ID (e.g., "2024-25")
             finished_only: Only return finished matches
             limit: Maximum number of matches to return
@@ -93,7 +121,11 @@ class QueryHelpers:
         Returns:
             List of match documents (without embedded player_stats for efficiency)
         """
-        league_season_key = f"{league_id}_{season_id}"
+        league_id_int = _ensure_int(league_id)
+        if league_id_int is None:
+            return []
+        
+        league_season_key = f"{league_id_int}_{season_id}"
         
         query = {"league_season_key": league_season_key}
         if finished_only:
@@ -107,29 +139,33 @@ class QueryHelpers:
             }
         ).sort("match_datetime_utc", -1).skip(skip).limit(limit))
     
-    def get_match_by_id(self, match_id: str, include_player_stats: bool = True) -> Optional[dict]:
+    def get_match_by_id(self, match_id: Union[int, str], include_player_stats: bool = True) -> Optional[dict]:
         """
         Get a single match by ID.
         
         Args:
-            match_id: Match ID
+            match_id: Match ID (int or string)
             include_player_stats: Whether to include embedded player_stats
             
         Returns:
             Match document or None
         """
+        match_id_int = _ensure_int(match_id)
+        if match_id_int is None:
+            return None
+        
         projection = {"_id": 0}
         if not include_player_stats:
             projection["player_stats"] = 0
         
         return self.mongo.matches.find_one(
-            {"match_id": str(match_id)},
+            {"match_id": match_id_int},
             projection
         )
     
     def get_recent_matches(
         self,
-        league_id: str = None,
+        league_id: Union[int, str] = None,
         days: int = 7,
         limit: int = 20
     ) -> List[dict]:
@@ -137,7 +173,7 @@ class QueryHelpers:
         Get recent matches from the last N days.
         
         Args:
-            league_id: Optional league filter
+            league_id: Optional league filter (int or string)
             days: Number of days to look back
             limit: Maximum results
             
@@ -147,8 +183,10 @@ class QueryHelpers:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         
         query = {"match_datetime_utc": {"$gte": cutoff}}
-        if league_id:
-            query["league_id"] = str(league_id)
+        if league_id is not None:
+            league_id_int = _ensure_int(league_id)
+            if league_id_int is not None:
+                query["league_id"] = league_id_int
         
         return list(self.mongo.matches.find(
             query,
@@ -157,7 +195,7 @@ class QueryHelpers:
     
     def get_team_matches(
         self,
-        team_id: str,
+        team_id: Union[int, str],
         league_season_key: str = None,
         limit: int = 20
     ) -> List[dict]:
@@ -165,17 +203,21 @@ class QueryHelpers:
         Get matches for a specific team.
         
         Args:
-            team_id: Team ID
+            team_id: Team ID (int or string)
             league_season_key: Optional league/season filter
             limit: Maximum results
             
         Returns:
             List of matches involving the team
         """
+        team_id_int = _ensure_int(team_id)
+        if team_id_int is None:
+            return []
+        
         query = {
             "$or": [
-                {"home_team.team_id": str(team_id)},
-                {"away_team.team_id": str(team_id)}
+                {"home_team.team_id": team_id_int},
+                {"away_team.team_id": team_id_int}
             ]
         }
         
@@ -193,7 +235,7 @@ class QueryHelpers:
     
     def get_player_stats(
         self,
-        player_id: str,
+        player_id: Union[int, str],
         league_season_key: str = None,
         limit: int = 50
     ) -> List[dict]:
@@ -201,14 +243,18 @@ class QueryHelpers:
         Get all stats for a specific player.
         
         Args:
-            player_id: Player ID
+            player_id: Player ID (int or string)
             league_season_key: Optional league/season filter
             limit: Maximum results
             
         Returns:
             List of player match stats, sorted by date descending
         """
-        query = {"player_id": str(player_id)}
+        player_id_int = _ensure_int(player_id)
+        if player_id_int is None:
+            return []
+        
+        query = {"player_id": player_id_int}
         
         if league_season_key:
             query["league_season_key"] = league_season_key
@@ -218,19 +264,23 @@ class QueryHelpers:
             {"_id": 0}
         ).sort("match_datetime_utc", -1).limit(limit))
     
-    def get_player_form(self, player_id: str, matches: int = 5) -> List[dict]:
+    def get_player_form(self, player_id: Union[int, str], matches: int = 5) -> List[dict]:
         """
         Get player's recent form (last N matches).
         
         Args:
-            player_id: Player ID
+            player_id: Player ID (int or string)
             matches: Number of recent matches
             
         Returns:
             List of recent match stats
         """
+        player_id_int = _ensure_int(player_id)
+        if player_id_int is None:
+            return []
+        
         return list(self.mongo.player_stats.find(
-            {"player_id": str(player_id)},
+            {"player_id": player_id_int},
             {
                 "_id": 0,
                 "match_id": 1,
@@ -246,24 +296,28 @@ class QueryHelpers:
             }
         ).sort("match_datetime_utc", -1).limit(matches))
     
-    def get_match_player_stats(self, match_id: str) -> List[dict]:
+    def get_match_player_stats(self, match_id: Union[int, str]) -> List[dict]:
         """
         Get all player stats for a specific match.
         
         Args:
-            match_id: Match ID
+            match_id: Match ID (int or string)
             
         Returns:
             List of player stats for the match
         """
+        match_id_int = _ensure_int(match_id)
+        if match_id_int is None:
+            return []
+        
         return list(self.mongo.player_stats.find(
-            {"match_id": str(match_id)},
+            {"match_id": match_id_int},
             {"_id": 0}
         ).sort("team_id", 1))
     
     def get_top_scorers(
         self,
-        league_id: str,
+        league_id: Union[int, str],
         season_id: str,
         limit: int = 20
     ) -> List[dict]:
@@ -271,14 +325,18 @@ class QueryHelpers:
         Get top scorers for a league/season.
         
         Args:
-            league_id: League ID
+            league_id: League ID (int or string)
             season_id: Season ID
             limit: Number of top scorers to return
             
         Returns:
             List of players with aggregated goal stats
         """
-        league_season_key = f"{league_id}_{season_id}"
+        league_id_int = _ensure_int(league_id)
+        if league_id_int is None:
+            return []
+        
+        league_season_key = f"{league_id_int}_{season_id}"
         
         pipeline = [
             {"$match": {"league_season_key": league_season_key}},
@@ -317,14 +375,18 @@ class QueryHelpers:
     
     def get_top_assists(
         self,
-        league_id: str,
+        league_id: Union[int, str],
         season_id: str,
         limit: int = 20
     ) -> List[dict]:
         """
         Get top assist providers for a league/season.
         """
-        league_season_key = f"{league_id}_{season_id}"
+        league_id_int = _ensure_int(league_id)
+        if league_id_int is None:
+            return []
+        
+        league_season_key = f"{league_id_int}_{season_id}"
         
         pipeline = [
             {"$match": {"league_season_key": league_season_key}},
@@ -361,7 +423,7 @@ class QueryHelpers:
     
     def get_top_rated_players(
         self,
-        league_id: str,
+        league_id: Union[int, str],
         season_id: str,
         min_matches: int = 5,
         limit: int = 20
@@ -370,12 +432,16 @@ class QueryHelpers:
         Get top rated players for a league/season.
         
         Args:
-            league_id: League ID
+            league_id: League ID (int or string)
             season_id: Season ID
             min_matches: Minimum matches played to qualify
             limit: Number of players to return
         """
-        league_season_key = f"{league_id}_{season_id}"
+        league_id_int = _ensure_int(league_id)
+        if league_id_int is None:
+            return []
+        
+        league_season_key = f"{league_id_int}_{season_id}"
         
         pipeline = [
             {"$match": {"league_season_key": league_season_key, "rating": {"$ne": None}}},
@@ -413,20 +479,27 @@ class QueryHelpers:
     
     def compare_players(
         self,
-        player_ids: List[str],
+        player_ids: List[Union[int, str]],
         league_season_key: str = None
     ) -> List[dict]:
         """
         Compare multiple players' stats.
         
         Args:
-            player_ids: List of player IDs to compare
+            player_ids: List of player IDs to compare (int or string)
             league_season_key: Optional filter by league/season
             
         Returns:
             List of aggregated stats for each player
         """
-        query = {"player_id": {"$in": [str(pid) for pid in player_ids]}}
+        # Convert all player IDs to integers
+        player_ids_int = [_ensure_int(pid) for pid in player_ids]
+        player_ids_int = [pid for pid in player_ids_int if pid is not None]
+        
+        if not player_ids_int:
+            return []
+        
+        query = {"player_id": {"$in": player_ids_int}}
         
         if league_season_key:
             query["league_season_key"] = league_season_key
@@ -480,23 +553,27 @@ class QueryHelpers:
     
     def get_player_season_summary(
         self,
-        player_id: str,
+        player_id: Union[int, str],
         league_season_key: str
     ) -> Optional[dict]:
         """
         Get a player's season summary stats.
         
         Args:
-            player_id: Player ID
+            player_id: Player ID (int or string)
             league_season_key: League and season key
             
         Returns:
             Aggregated season stats for the player
         """
+        player_id_int = _ensure_int(player_id)
+        if player_id_int is None:
+            return None
+        
         pipeline = [
             {
                 "$match": {
-                    "player_id": str(player_id),
+                    "player_id": player_id_int,
                     "league_season_key": league_season_key
                 }
             },
@@ -539,16 +616,20 @@ class QueryHelpers:
     # Team Queries
     # =========================================================================
     
-    def get_team_by_id(self, team_id: str) -> Optional[dict]:
+    def get_team_by_id(self, team_id: Union[int, str]) -> Optional[dict]:
         """Get a team by ID."""
+        team_id_int = _ensure_int(team_id)
+        if team_id_int is None:
+            return None
+        
         return self.mongo.teams.find_one(
-            {"team_id": str(team_id)},
+            {"team_id": team_id_int},
             {"_id": 0}
         )
     
     def get_team_players(
         self,
-        team_id: str,
+        team_id: Union[int, str],
         league_season_key: str
     ) -> List[dict]:
         """
@@ -556,10 +637,14 @@ class QueryHelpers:
         
         Returns aggregated stats for each player.
         """
+        team_id_int = _ensure_int(team_id)
+        if team_id_int is None:
+            return []
+        
         pipeline = [
             {
                 "$match": {
-                    "team_id": str(team_id),
+                    "team_id": team_id_int,
                     "league_season_key": league_season_key
                 }
             },
@@ -595,18 +680,22 @@ class QueryHelpers:
     
     def get_team_season_stats(
         self,
-        team_id: str,
+        team_id: Union[int, str],
         league_season_key: str
     ) -> dict:
         """
         Get aggregated team stats for a season.
         """
+        team_id_int = _ensure_int(team_id)
+        if team_id_int is None:
+            return {}
+        
         # Get all matches for the team
         matches = list(self.mongo.matches.find(
             {
                 "$or": [
-                    {"home_team.team_id": str(team_id)},
-                    {"away_team.team_id": str(team_id)}
+                    {"home_team.team_id": team_id_int},
+                    {"away_team.team_id": team_id_int}
                 ],
                 "league_season_key": league_season_key,
                 "finished": True
@@ -627,7 +716,7 @@ class QueryHelpers:
             home_team = match.get("home_team", {})
             away_team = match.get("away_team", {})
             
-            is_home = home_team.get("team_id") == str(team_id)
+            is_home = home_team.get("team_id") == team_id_int
             
             home_score = home_team.get("score", 0) or 0
             away_score = away_team.get("score", 0) or 0
@@ -687,21 +776,29 @@ class QueryHelpers:
     # Player Profile Queries
     # =========================================================================
     
-    def get_player_profile(self, player_id: str) -> Optional[dict]:
+    def get_player_profile(self, player_id: Union[int, str]) -> Optional[dict]:
         """
         Get player profile from players collection.
         """
+        player_id_int = _ensure_int(player_id)
+        if player_id_int is None:
+            return None
+        
         return self.mongo.players.find_one(
-            {"player_id": str(player_id)},
+            {"player_id": player_id_int},
             {"_id": 0}
         )
     
-    def get_player_career_stats(self, player_id: str) -> dict:
+    def get_player_career_stats(self, player_id: Union[int, str]) -> dict:
         """
         Get aggregated career stats for a player across all seasons.
         """
+        player_id_int = _ensure_int(player_id)
+        if player_id_int is None:
+            return {}
+        
         pipeline = [
-            {"$match": {"player_id": str(player_id)}},
+            {"$match": {"player_id": player_id_int}},
             {
                 "$group": {
                     "_id": "$player_id",

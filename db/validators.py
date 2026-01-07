@@ -3,6 +3,13 @@ Data Validators for Football Stats Platform
 
 Pydantic models for validating data before MongoDB insertion.
 Ensures data integrity and prevents malformed data from entering the database.
+
+Updated: Integer IDs version
+- league_id: int
+- match_id: int
+- player_id: int  
+- team_id: int
+- Removed player_match_key (replaced by compound unique index)
 """
 
 from datetime import datetime
@@ -12,13 +19,36 @@ import re
 
 
 # =============================================================================
+# Helper Functions
+# =============================================================================
+
+def safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    """Safely convert a value to integer."""
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return default
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    if isinstance(value, float):
+        return int(value)
+    return default
+
+
+# =============================================================================
 # League Validators
 # =============================================================================
 
 class LeagueValidator(BaseModel):
     """Validates league data before insertion."""
     
-    league_id: str = Field(..., min_length=1, max_length=20)
+    league_id: int = Field(..., ge=1)
     name: str = Field(..., min_length=1, max_length=200)
     localized_name: Optional[str] = Field(default=None, max_length=200)
     country_code: Optional[str] = Field(default="", max_length=10)
@@ -27,10 +57,13 @@ class LeagueValidator(BaseModel):
     
     @field_validator('league_id', mode='before')
     @classmethod
-    def convert_league_id_to_str(cls, v):
+    def convert_league_id_to_int(cls, v):
         if v is None:
             raise ValueError("league_id cannot be None")
-        return str(v).strip()
+        result = safe_int(v)
+        if result is None:
+            raise ValueError(f"league_id must be convertible to int, got: {v}")
+        return result
     
     @field_validator('name', mode='before')
     @classmethod
@@ -61,7 +94,7 @@ class SeasonInfoValidator(BaseModel):
 class SeasonValidator(BaseModel):
     """Validates season data before insertion."""
     
-    league_id: str = Field(..., min_length=1, max_length=20)
+    league_id: int = Field(..., ge=1)
     season_id: str = Field(..., min_length=4, max_length=20)
     league_season_key: Optional[str] = None
     league_name: Optional[str] = Field(default="", max_length=200)
@@ -74,11 +107,21 @@ class SeasonValidator(BaseModel):
             self.league_season_key = f"{self.league_id}_{self.season_id}"
         return self
     
-    @field_validator('league_id', 'season_id', mode='before')
+    @field_validator('league_id', mode='before')
     @classmethod
-    def convert_to_str(cls, v):
+    def convert_league_id(cls, v):
         if v is None:
-            raise ValueError("Value cannot be None")
+            raise ValueError("league_id cannot be None")
+        result = safe_int(v)
+        if result is None:
+            raise ValueError(f"league_id must be convertible to int, got: {v}")
+        return result
+    
+    @field_validator('season_id', mode='before')
+    @classmethod
+    def convert_season_id(cls, v):
+        if v is None:
+            raise ValueError("season_id cannot be None")
         return str(v).strip()
     
     @field_validator('season_id', mode='after')
@@ -98,15 +141,18 @@ class SeasonValidator(BaseModel):
 class TeamValidator(BaseModel):
     """Validates team data before insertion."""
     
-    team_id: str = Field(..., min_length=1, max_length=20)
+    team_id: int = Field(..., ge=1)
     name: str = Field(..., min_length=1, max_length=200)
     
     @field_validator('team_id', mode='before')
     @classmethod
-    def convert_team_id_to_str(cls, v):
+    def convert_team_id_to_int(cls, v):
         if v is None:
             raise ValueError("team_id cannot be None")
-        return str(v).strip()
+        result = safe_int(v)
+        if result is None:
+            raise ValueError(f"team_id must be convertible to int, got: {v}")
+        return result
     
     @field_validator('name', mode='before')
     @classmethod
@@ -119,16 +165,16 @@ class TeamValidator(BaseModel):
 class TeamEmbeddedValidator(BaseModel):
     """Validates embedded team data in match documents."""
     
-    team_id: str = Field(..., min_length=1, max_length=20)
+    team_id: Optional[int] = Field(default=None, ge=1)
     name: str = Field(default="Unknown Team", max_length=200)
     score: Optional[int] = Field(default=None, ge=0, le=50)
     
     @field_validator('team_id', mode='before')
     @classmethod
-    def convert_to_str(cls, v):
+    def convert_to_int(cls, v):
         if v is None:
-            return ""
-        return str(v).strip()
+            return None
+        return safe_int(v)
 
 
 # =============================================================================
@@ -136,11 +182,11 @@ class TeamEmbeddedValidator(BaseModel):
 # =============================================================================
 
 class PlayerStatValidator(BaseModel):
-    """Validates individual player statistics."""
+    """Validates individual player statistics (for embedded use in matches)."""
     
-    player_id: str = Field(..., min_length=1, max_length=20)
+    player_id: int = Field(..., ge=1)
     name: str = Field(default="Unknown Player", max_length=200)
-    team_id: str = Field(default="", max_length=20)
+    team_id: Optional[int] = Field(default=None, ge=1)
     team_name: str = Field(default="", max_length=200)
     is_goalkeeper: bool = Field(default=False)
     
@@ -160,14 +206,17 @@ class PlayerStatValidator(BaseModel):
     def convert_player_id(cls, v):
         if v is None:
             raise ValueError("player_id cannot be None")
-        return str(v).strip()
+        result = safe_int(v)
+        if result is None:
+            raise ValueError(f"player_id must be convertible to int, got: {v}")
+        return result
     
     @field_validator('team_id', mode='before')
     @classmethod
     def convert_team_id(cls, v):
         if v is None:
-            return ""
-        return str(v).strip()
+            return None
+        return safe_int(v)
     
     @field_validator('goals', 'assists', 'minutes_played', mode='before')
     @classmethod
@@ -205,24 +254,27 @@ class PlayerStatValidator(BaseModel):
 
 
 class PlayerMatchStatValidator(BaseModel):
-    """Validates flattened player-match stat record for player_stats collection."""
+    """
+    Validates flattened player-match stat record for player_stats collection.
     
-    player_match_key: Optional[str] = None
-    player_id: str = Field(..., min_length=1, max_length=20)
+    Note: player_match_key is removed - using compound unique index on (player_id, match_id) instead.
+    """
+    
+    player_id: int = Field(..., ge=1)
     name: str = Field(default="Unknown Player", max_length=200)
-    team_id: str = Field(default="", max_length=20)
+    team_id: Optional[int] = Field(default=None, ge=1)
     team_name: str = Field(default="", max_length=200)
     is_goalkeeper: bool = Field(default=False)
     
     # Match context
-    match_id: str = Field(..., min_length=1, max_length=20)
+    match_id: int = Field(..., ge=1)
     match_datetime_utc: Optional[datetime] = None
-    league_id: str = Field(default="", max_length=20)
+    league_id: Optional[int] = Field(default=None, ge=1)
     season_id: str = Field(default="", max_length=20)
     league_season_key: str = Field(default="", max_length=50)
     
     # Opponent info
-    opponent_team_id: str = Field(default="", max_length=20)
+    opponent_team_id: Optional[int] = Field(default=None, ge=1)
     opponent_team_name: str = Field(default="", max_length=200)
     is_home: bool = Field(default=False)
     
@@ -234,22 +286,26 @@ class PlayerMatchStatValidator(BaseModel):
     rating: Optional[float] = Field(default=None, ge=0, le=10)
     minutes_played: int = Field(default=0, ge=0, le=150)
     
-    @model_validator(mode='after')
-    def set_player_match_key(self):
-        if not self.player_match_key:
-            self.player_match_key = f"{self.player_id}_{self.match_id}"
-        return self
-    
     @field_validator('player_id', 'match_id', mode='before')
     @classmethod
     def convert_required_ids(cls, v):
         if v is None:
             raise ValueError("Value cannot be None")
-        return str(v).strip()
+        result = safe_int(v)
+        if result is None:
+            raise ValueError(f"Value must be convertible to int, got: {v}")
+        return result
     
-    @field_validator('team_id', 'league_id', 'season_id', 'opponent_team_id', mode='before')
+    @field_validator('team_id', 'league_id', 'opponent_team_id', mode='before')
     @classmethod
     def convert_optional_ids(cls, v):
+        if v is None:
+            return None
+        return safe_int(v)
+    
+    @field_validator('season_id', mode='before')
+    @classmethod
+    def convert_season_id(cls, v):
         if v is None:
             return ""
         return str(v).strip()
@@ -270,8 +326,8 @@ class MatchStatsSummaryValidator(BaseModel):
 class MatchValidator(BaseModel):
     """Validates match data before insertion."""
     
-    match_id: str = Field(..., min_length=1, max_length=20)
-    league_id: str = Field(default="", max_length=20)
+    match_id: int = Field(..., ge=1)
+    league_id: Optional[int] = Field(default=None, ge=1)
     season_id: str = Field(default="", max_length=20)
     league_season_key: Optional[str] = None
     match_name: str = Field(default="", max_length=300)
@@ -294,11 +350,21 @@ class MatchValidator(BaseModel):
     def convert_match_id(cls, v):
         if v is None:
             raise ValueError("match_id cannot be None")
-        return str(v).strip()
+        result = safe_int(v)
+        if result is None:
+            raise ValueError(f"match_id must be convertible to int, got: {v}")
+        return result
     
-    @field_validator('league_id', 'season_id', mode='before')
+    @field_validator('league_id', mode='before')
     @classmethod
-    def convert_optional_str(cls, v):
+    def convert_league_id(cls, v):
+        if v is None:
+            return None
+        return safe_int(v)
+    
+    @field_validator('season_id', mode='before')
+    @classmethod
+    def convert_season_id(cls, v):
         if v is None:
             return ""
         return str(v).strip()
@@ -311,24 +377,31 @@ class MatchValidator(BaseModel):
 class PlayerSeasonSummaryValidator(BaseModel):
     """Validates player season summary in player profiles."""
     
-    league_id: str = Field(default="", max_length=20)
+    league_id: Optional[int] = Field(default=None, ge=1)
     season_id: str = Field(default="", max_length=20)
     league_season_key: str = Field(default="", max_length=50)
-    team_id: str = Field(default="", max_length=20)
+    team_id: Optional[int] = Field(default=None, ge=1)
     team_name: str = Field(default="", max_length=200)
     matches: int = Field(default=0, ge=0)
     goals: int = Field(default=0, ge=0)
     assists: int = Field(default=0, ge=0)
     minutes_played: int = Field(default=0, ge=0)
     avg_rating: Optional[float] = Field(default=None, ge=0, le=10)
+    
+    @field_validator('league_id', 'team_id', mode='before')
+    @classmethod
+    def convert_ids(cls, v):
+        if v is None:
+            return None
+        return safe_int(v)
 
 
 class PlayerProfileValidator(BaseModel):
     """Validates aggregated player profile data."""
     
-    player_id: str = Field(..., min_length=1, max_length=20)
+    player_id: int = Field(..., ge=1)
     name: str = Field(default="Unknown Player", max_length=200)
-    current_team_id: Optional[str] = Field(default=None, max_length=20)
+    current_team_id: Optional[int] = Field(default=None, ge=1)
     current_team_name: Optional[str] = Field(default=None, max_length=200)
     is_goalkeeper: bool = Field(default=False)
     total_matches: int = Field(default=0, ge=0)
@@ -343,7 +416,17 @@ class PlayerProfileValidator(BaseModel):
     def convert_player_id(cls, v):
         if v is None:
             raise ValueError("player_id cannot be None")
-        return str(v).strip()
+        result = safe_int(v)
+        if result is None:
+            raise ValueError(f"player_id must be convertible to int, got: {v}")
+        return result
+    
+    @field_validator('current_team_id', mode='before')
+    @classmethod
+    def convert_team_id(cls, v):
+        if v is None:
+            return None
+        return safe_int(v)
 
 
 # =============================================================================

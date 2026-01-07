@@ -4,9 +4,12 @@ Pipeline State Management
 Provides checkpoint/resume functionality for the data pipeline.
 Tracks processing status at season level with failed match tracking.
 
+Updated: Integer IDs version
+- league_id: int
+- match_id in processed_matches/failed_matches: int
+
 Collections:
 - pipeline_state: Tracks league/season processing status
-- pipeline_runs: Tracks overall pipeline run history
 
 Usage:
     from db.pipeline_state import PipelineStateManager
@@ -14,28 +17,44 @@ Usage:
     state_manager = PipelineStateManager()
     
     # Check if season needs processing
-    if state_manager.should_process_season("47", "2024-2025"):
+    if state_manager.should_process_season(47, "2024-2025"):
         # Process the season...
-        state_manager.mark_season_in_progress("47", "2024-2025", total_matches=380)
+        state_manager.mark_season_in_progress(47, "2024-2025", total_matches=380)
         
         for match_id in match_ids:
             try:
                 process_match(match_id)
-                state_manager.record_match_processed("47", "2024-2025", match_id)
+                state_manager.record_match_processed(47, "2024-2025", match_id)
             except Exception as e:
-                state_manager.record_match_failed("47", "2024-2025", match_id, str(e))
+                state_manager.record_match_failed(47, "2024-2025", match_id, str(e))
         
-        state_manager.mark_season_completed("47", "2024-2025")
+        state_manager.mark_season_completed(47, "2024-2025")
 """
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Union
 from enum import Enum
 
 from db.mongodb_service import get_mongodb_service, MongoDBService
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_int(value: Any) -> Optional[int]:
+    """Ensure value is an integer."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    if isinstance(value, float):
+        return int(value)
+    return None
 
 
 class SeasonStatus(str, Enum):
@@ -83,34 +102,39 @@ class PipelineStateManager:
     # Season Status Methods
     # =========================================================================
     
-    def get_season_state(self, league_id: str, season_id: str) -> Optional[dict]:
+    def get_season_state(self, league_id: Union[int, str], season_id: str) -> Optional[dict]:
         """
         Get the current state of a season.
         
         Args:
-            league_id: League ID
-            season_id: Season ID
+            league_id: League ID (int or string, will be converted to int)
+            season_id: Season ID (string)
             
         Returns:
             State document or None if not found
         """
+        league_id_int = _ensure_int(league_id)
+        if league_id_int is None:
+            logger.warning(f"Invalid league_id: {league_id}")
+            return None
+        
         return self.state_collection.find_one({
-            "league_id": str(league_id),
+            "league_id": league_id_int,
             "season_id": str(season_id)
         })
     
     def should_process_season(
         self,
-        league_id: str,
+        league_id: Union[int, str],
         season_id: str,
         force: bool = False
-    ) -> Tuple[bool, List[str]]:
+    ) -> Tuple[bool, List[int]]:
         """
         Check if a season should be processed.
         
         Args:
-            league_id: League ID
-            season_id: Season ID
+            league_id: League ID (int or string)
+            season_id: Season ID (string)
             force: If True, always process (ignore completed status)
             
         Returns:
@@ -164,7 +188,7 @@ class PipelineStateManager:
     
     def mark_season_in_progress(
         self,
-        league_id: str,
+        league_id: Union[int, str],
         season_id: str,
         total_matches: int
     ):
@@ -172,15 +196,20 @@ class PipelineStateManager:
         Mark a season as in progress.
         
         Args:
-            league_id: League ID
-            season_id: Season ID
+            league_id: League ID (int or string)
+            season_id: Season ID (string)
             total_matches: Total number of matches to process
         """
+        league_id_int = _ensure_int(league_id)
+        if league_id_int is None:
+            logger.error(f"Invalid league_id: {league_id}")
+            return
+        
         now = datetime.now(timezone.utc)
         
         self.state_collection.update_one(
             {
-                "league_id": str(league_id),
+                "league_id": league_id_int,
                 "season_id": str(season_id)
             },
             {
@@ -190,7 +219,7 @@ class PipelineStateManager:
                     "last_updated": now
                 },
                 "$setOnInsert": {
-                    "league_id": str(league_id),
+                    "league_id": league_id_int,
                     "season_id": str(season_id),
                     "processed_matches": [],
                     "failed_matches": [],
@@ -200,13 +229,13 @@ class PipelineStateManager:
             upsert=True
         )
         
-        logger.info(f"Season {league_id}_{season_id} marked as in_progress ({total_matches} matches)")
+        logger.info(f"Season {league_id_int}_{season_id} marked as in_progress ({total_matches} matches)")
     
     def record_match_processed(
         self,
-        league_id: str,
+        league_id: Union[int, str],
         season_id: str,
-        match_id: str
+        match_id: Union[int, str]
     ):
         """
         Record that a match was successfully processed.
@@ -216,23 +245,30 @@ class PipelineStateManager:
             season_id: Season ID
             match_id: Match ID that was processed
         """
+        league_id_int = _ensure_int(league_id)
+        match_id_int = _ensure_int(match_id)
+        
+        if league_id_int is None or match_id_int is None:
+            logger.warning(f"Invalid IDs: league_id={league_id}, match_id={match_id}")
+            return
+        
         self.state_collection.update_one(
             {
-                "league_id": str(league_id),
+                "league_id": league_id_int,
                 "season_id": str(season_id)
             },
             {
-                "$addToSet": {"processed_matches": str(match_id)},
-                "$pull": {"failed_matches": {"match_id": str(match_id)}},
+                "$addToSet": {"processed_matches": match_id_int},
+                "$pull": {"failed_matches": {"match_id": match_id_int}},
                 "$set": {"last_updated": datetime.now(timezone.utc)}
             }
         )
     
     def record_match_failed(
         self,
-        league_id: str,
+        league_id: Union[int, str],
         season_id: str,
-        match_id: str,
+        match_id: Union[int, str],
         error: str = None
     ):
         """
@@ -244,8 +280,15 @@ class PipelineStateManager:
             match_id: Match ID that failed
             error: Error message (optional)
         """
+        league_id_int = _ensure_int(league_id)
+        match_id_int = _ensure_int(match_id)
+        
+        if league_id_int is None or match_id_int is None:
+            logger.warning(f"Invalid IDs: league_id={league_id}, match_id={match_id}")
+            return
+        
         failure_record = {
-            "match_id": str(match_id),
+            "match_id": match_id_int,
             "error": error or "Unknown error",
             "failed_at": datetime.now(timezone.utc)
         }
@@ -253,17 +296,17 @@ class PipelineStateManager:
         # Remove from failed_matches first (in case of retry), then add updated record
         self.state_collection.update_one(
             {
-                "league_id": str(league_id),
+                "league_id": league_id_int,
                 "season_id": str(season_id)
             },
             {
-                "$pull": {"failed_matches": {"match_id": str(match_id)}}
+                "$pull": {"failed_matches": {"match_id": match_id_int}}
             }
         )
         
         self.state_collection.update_one(
             {
-                "league_id": str(league_id),
+                "league_id": league_id_int,
                 "season_id": str(season_id)
             },
             {
@@ -274,7 +317,7 @@ class PipelineStateManager:
     
     def mark_season_completed(
         self,
-        league_id: str,
+        league_id: Union[int, str],
         season_id: str
     ):
         """
@@ -282,7 +325,12 @@ class PipelineStateManager:
         
         If there are failed matches, marks as PARTIALLY_COMPLETED instead.
         """
-        state = self.get_season_state(league_id, season_id)
+        league_id_int = _ensure_int(league_id)
+        if league_id_int is None:
+            logger.error(f"Invalid league_id: {league_id}")
+            return
+        
+        state = self.get_season_state(league_id_int, season_id)
         
         failed_count = len(state.get("failed_matches", [])) if state else 0
         processed_count = len(state.get("processed_matches", [])) if state else 0
@@ -296,7 +344,7 @@ class PipelineStateManager:
         
         self.state_collection.update_one(
             {
-                "league_id": str(league_id),
+                "league_id": league_id_int,
                 "season_id": str(season_id)
             },
             {
@@ -308,19 +356,24 @@ class PipelineStateManager:
             }
         )
         
-        logger.info(f"Season {league_id}_{season_id} marked as {status}. "
+        logger.info(f"Season {league_id_int}_{season_id} marked as {status}. "
                 f"Processed: {processed_count}, Failed: {failed_count}")
     
     def mark_season_failed(
         self,
-        league_id: str,
+        league_id: Union[int, str],
         season_id: str,
         error: str = None
     ):
         """Mark a season as failed (e.g., couldn't fetch season data)."""
+        league_id_int = _ensure_int(league_id)
+        if league_id_int is None:
+            logger.error(f"Invalid league_id: {league_id}")
+            return
+        
         self.state_collection.update_one(
             {
-                "league_id": str(league_id),
+                "league_id": league_id_int,
                 "season_id": str(season_id)
             },
             {
@@ -330,7 +383,7 @@ class PipelineStateManager:
                     "last_updated": datetime.now(timezone.utc)
                 },
                 "$setOnInsert": {
-                    "league_id": str(league_id),
+                    "league_id": league_id_int,
                     "season_id": str(season_id),
                     "started_at": datetime.now(timezone.utc)
                 }
@@ -342,7 +395,7 @@ class PipelineStateManager:
     # Query Methods
     # =========================================================================
     
-    def get_pending_seasons(self, league_id: str = None) -> List[dict]:
+    def get_pending_seasons(self, league_id: Union[int, str] = None) -> List[dict]:
         """Get all seasons that need processing."""
         query = {
             "status": {"$in": [
@@ -353,28 +406,34 @@ class PipelineStateManager:
             ]}
         }
         
-        if league_id:
-            query["league_id"] = str(league_id)
+        if league_id is not None:
+            league_id_int = _ensure_int(league_id)
+            if league_id_int is not None:
+                query["league_id"] = league_id_int
         
         return list(self.state_collection.find(query))
     
-    def get_completed_seasons(self, league_id: str = None) -> List[dict]:
+    def get_completed_seasons(self, league_id: Union[int, str] = None) -> List[dict]:
         """Get all completed seasons."""
         query = {"status": SeasonStatus.COMPLETED}
         
-        if league_id:
-            query["league_id"] = str(league_id)
+        if league_id is not None:
+            league_id_int = _ensure_int(league_id)
+            if league_id_int is not None:
+                query["league_id"] = league_id_int
         
         return list(self.state_collection.find(query))
     
-    def get_failed_matches(self, league_id: str = None) -> List[dict]:
+    def get_failed_matches(self, league_id: Union[int, str] = None) -> List[dict]:
         """Get all failed matches across all seasons."""
         query = {
             "failed_matches": {"$exists": True, "$ne": []}
         }
         
-        if league_id:
-            query["league_id"] = str(league_id)
+        if league_id is not None:
+            league_id_int = _ensure_int(league_id)
+            if league_id_int is not None:
+                query["league_id"] = league_id_int
         
         results = []
         for state in self.state_collection.find(query):
@@ -425,13 +484,18 @@ class PipelineStateManager:
     # Utility Methods
     # =========================================================================
     
-    def reset_season(self, league_id: str, season_id: str):
+    def reset_season(self, league_id: Union[int, str], season_id: str):
         """Reset a season's state (for re-processing)."""
+        league_id_int = _ensure_int(league_id)
+        if league_id_int is None:
+            logger.error(f"Invalid league_id: {league_id}")
+            return
+        
         self.state_collection.delete_one({
-            "league_id": str(league_id),
+            "league_id": league_id_int,
             "season_id": str(season_id)
         })
-        logger.info(f"Reset state for season {league_id}_{season_id}")
+        logger.info(f"Reset state for season {league_id_int}_{season_id}")
     
     def reset_all(self, confirm: bool = False):
         """Reset all pipeline state. Use with caution!"""
@@ -444,16 +508,22 @@ class PipelineStateManager:
     
     def is_match_processed(
         self,
-        league_id: str,
+        league_id: Union[int, str],
         season_id: str,
-        match_id: str
+        match_id: Union[int, str]
     ) -> bool:
         """Check if a specific match has been processed."""
-        state = self.get_season_state(league_id, season_id)
+        league_id_int = _ensure_int(league_id)
+        match_id_int = _ensure_int(match_id)
+        
+        if league_id_int is None or match_id_int is None:
+            return False
+        
+        state = self.get_season_state(league_id_int, season_id)
         if not state:
             return False
         
-        return str(match_id) in state.get("processed_matches", [])
+        return match_id_int in state.get("processed_matches", [])
 
 
 # =============================================================================
