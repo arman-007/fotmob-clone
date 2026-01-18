@@ -12,10 +12,12 @@ Features:
     - Safe updates: won't overwrite existing data with empty responses
     - Optional JSON output for debugging
     - Token refresh every 35-40 matches
+    - Flexible date selection with --days-back flag
 
 Usage:
     python daily_pipeline.py                          # Fetch today's matches
     python daily_pipeline.py -d 20241215              # Fetch specific date
+    python daily_pipeline.py --days-back 1            # Fetch yesterday's matches
     python daily_pipeline.py --leagues 47,55,87       # Only specific leagues
     python daily_pipeline.py --no-json                # Skip JSON output
     python daily_pipeline.py --finished-only          # Only finished matches
@@ -24,6 +26,8 @@ Usage:
 
 CLI Flags:
     -d, --date DATE         Date to fetch (YYYYMMDD format, default: today)
+    --days-back N           Fetch matches from N days ago (overrides --date)
+                            Example: --days-back 1 for yesterday
     --leagues IDS           Comma-separated league IDs to filter (default: all)
                             Example: --leagues 47,55,87
     --no-json               Skip saving JSON files
@@ -41,6 +45,12 @@ Examples:
     # Fetch all of today's finished matches
     python daily_pipeline.py --finished-only
 
+    # Fetch yesterday's finished matches (for late-night games)
+    python daily_pipeline.py --days-back 1 --finished-only
+
+    # Fetch matches from 2 days ago
+    python daily_pipeline.py --days-back 2 --finished-only
+
     # Fetch matches from a specific date
     python daily_pipeline.py -d 20241215 --finished-only
 
@@ -53,11 +63,21 @@ Examples:
     # Check match summary for today
     python daily_pipeline.py --status
 
+    # Check match summary for yesterday
+    python daily_pipeline.py --status --days-back 1
+
     # Test with 10 matches
     python daily_pipeline.py --match-limit 10
 
     # Skip JSON, only save to MongoDB
     python daily_pipeline.py --no-json --finished-only
+
+Cron Examples:
+    # Run every 2 hours for today's matches
+    0 */2 * * * cd /opt/football-stats-pipeline && source venv/bin/activate && python daily_pipeline.py --no-json --finished-only
+
+    # Run once at 6 AM for yesterday's late matches
+    0 6 * * * cd /opt/football-stats-pipeline && source venv/bin/activate && python daily_pipeline.py --no-json --finished-only --days-back 1
 """
 
 import argparse
@@ -66,7 +86,7 @@ import os
 import random
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Set
 
 # Add project root to path for imports
@@ -118,6 +138,34 @@ def parse_league_ids(leagues_str: str) -> Optional[List[int]]:
             league_ids.append(lid_int)
     
     return league_ids if league_ids else None
+
+
+def calculate_date(days_back: int = 0, base_date: str = None) -> str:
+    """
+    Calculate the target date based on days_back offset.
+    
+    Args:
+        days_back: Number of days to go back (0 = today, 1 = yesterday, etc.)
+        base_date: Optional base date in YYYYMMDD format (default: today)
+        
+    Returns:
+        Date string in YYYYMMDD format
+    """
+    if base_date:
+        # Parse the provided base date
+        try:
+            target = datetime.strptime(base_date, "%Y%m%d")
+        except ValueError:
+            logging.warning(f"Invalid date format '{base_date}', using today")
+            target = datetime.now()
+    else:
+        target = datetime.now()
+    
+    # Subtract days if days_back is specified
+    if days_back > 0:
+        target = target - timedelta(days=days_back)
+    
+    return target.strftime("%Y%m%d")
 
 
 # =============================================================================
@@ -201,13 +249,28 @@ def show_daily_status(date: str, league_ids: List[int] = None) -> None:
     - Matches by status (not started, in progress, finished)
     - Matches by league
     """
+    # Format date for display
+    try:
+        date_obj = datetime.strptime(date, "%Y%m%d")
+        date_display = date_obj.strftime("%Y-%m-%d (%A)")
+    except ValueError:
+        date_display = date
+    
     print(f"\n{'='*60}")
     print(f"DAILY MATCH STATUS FOR {date}")
+    print(f"Date: {date_display}")
     print(f"{'='*60}")
     
-    # Try to load from cached JSON first
+    # Capture X-MAS token first
+    x_mas = capture_x_mas()
+    if not x_mas:
+        print("❌ Failed to capture X-MAS token")
+        return
+    
+    # Fetch matches
     result = fetch_matches_by_date(
         date=date,
+        x_mas=x_mas,
         league_ids=league_ids,
         save_to_json=True
     )
@@ -296,6 +359,13 @@ def run_daily_pipeline(
     """
     logger = logging.getLogger(__name__)
     
+    # Format date for display
+    try:
+        date_obj = datetime.strptime(date, "%Y%m%d")
+        date_display = date_obj.strftime("%Y-%m-%d (%A)")
+    except ValueError:
+        date_display = date
+    
     stats = {
         "date": date,
         "total_matches": 0,
@@ -308,9 +378,10 @@ def run_daily_pipeline(
     }
     
     failed_matches = []  # Track failed match IDs with errors
+    skipped_matches = []  # Track skipped match IDs with reasons
     
     logger.info(f"{'='*60}")
-    logger.info(f"DAILY PIPELINE - Processing date: {date}")
+    logger.info(f"DAILY PIPELINE - Processing date: {date} ({date_display})")
     logger.info(f"{'='*60}")
     logger.info(f"Configuration:")
     logger.info(f"  - Leagues filter: {league_ids or 'All leagues'}")
@@ -369,7 +440,6 @@ def run_daily_pipeline(
     # Step 4: Filter matches by status
     # =========================================================================
     matches_to_process = []
-    skipped_matches = []  # Track skipped match IDs with reasons
     
     for match in matches:
         status = match.get("status", {})
@@ -523,7 +593,7 @@ def run_daily_pipeline(
     print(f"\n{'='*60}")
     print("DAILY PIPELINE COMPLETE")
     print(f"{'='*60}")
-    print(f"Date: {date}")
+    print(f"Date: {date} ({date_display})")
     print(f"Total matches found: {stats['total_matches']}")
     print(f"Matches processed: {stats['processed']}")
     print(f"Matches skipped: {stats['skipped']}")
@@ -591,22 +661,39 @@ def main():
         epilog="""
 Examples:
     python daily_pipeline.py                          # Fetch today's matches
+    python daily_pipeline.py --days-back 1            # Fetch yesterday's matches
+    python daily_pipeline.py --days-back 2            # Fetch matches from 2 days ago
     python daily_pipeline.py -d 20241215              # Fetch specific date
     python daily_pipeline.py --leagues 47,55,87       # Only specific leagues
     python daily_pipeline.py --no-json                # Skip JSON output
     python daily_pipeline.py --finished-only          # Only finished matches
     python daily_pipeline.py --dry-run                # Preview without processing
     python daily_pipeline.py --status                 # Show match summary
+    python daily_pipeline.py --status --days-back 1   # Show yesterday's summary
     python daily_pipeline.py --match-limit 10         # Test with 10 matches
+
+Cron Examples:
+    # Every 2 hours for today's matches
+    0 */2 * * * cd /opt/football-stats-pipeline && source venv/bin/activate && python daily_pipeline.py --no-json --finished-only
+    
+    # Once at 6 AM for yesterday's late matches  
+    0 6 * * * cd /opt/football-stats-pipeline && source venv/bin/activate && python daily_pipeline.py --no-json --finished-only --days-back 1
         """
     )
     
-    # Date argument
+    # Date arguments
     parser.add_argument(
         "-d", "--date",
         type=str,
-        default=datetime.now().strftime("%Y%m%d"),
+        default=None,
         help="Date to fetch (YYYYMMDD format, default: today)"
+    )
+    
+    parser.add_argument(
+        "--days-back",
+        type=int,
+        default=0,
+        help="Fetch matches from N days ago (0=today, 1=yesterday, etc.). Overrides --date if both provided."
     )
     
     # League filter
@@ -688,17 +775,27 @@ Examples:
     # Setup logging
     logger = setup_logging(args.verbose)
     
+    # Calculate the target date
+    # --days-back takes precedence over --date
+    if args.days_back > 0:
+        target_date = calculate_date(days_back=args.days_back)
+        logger.info(f"Using --days-back {args.days_back}: targeting {target_date}")
+    elif args.date:
+        target_date = args.date
+    else:
+        target_date = datetime.now().strftime("%Y%m%d")
+    
     # Parse league IDs (now returns List[int])
     league_ids = parse_league_ids(args.leagues)
     
     # Status mode
     if args.status:
-        show_daily_status(args.date, league_ids)
+        show_daily_status(target_date, league_ids)
         return
     
     # Run pipeline
     stats = run_daily_pipeline(
-        date=args.date,
+        date=target_date,
         league_ids=league_ids,
         save_to_json=not args.no_json,
         save_to_mongodb=not args.no_mongodb,
