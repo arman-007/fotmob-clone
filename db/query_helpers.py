@@ -21,24 +21,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, Union
 
 from db.mongodb_service import get_mongodb_service, MongoDBService
+from utils.converters import safe_int as _ensure_int
 
 logger = logging.getLogger(__name__)
-
-
-def _ensure_int(value: Any) -> Optional[int]:
-    """Ensure value is an integer."""
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value.strip())
-        except ValueError:
-            return None
-    if isinstance(value, float):
-        return int(value)
-    return None
 
 
 class QueryHelpers:

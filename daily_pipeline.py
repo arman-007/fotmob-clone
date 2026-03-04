@@ -89,9 +89,6 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Optional, Set
 
-# Add project root to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from service.get_auth_headers import capture_x_mas
 from service.get_daily_matches import fetch_matches_by_date, get_match_ids_from_json
 from service.match_stats_processor import (
@@ -101,6 +98,10 @@ from service.match_stats_processor import (
     save_match_to_json
 )
 
+# Shared utilities
+from utils.converters import safe_int
+from utils.logging_config import setup_logging
+
 # MongoDB imports
 try:
     from db import get_mongodb_service, MongoDBConfig
@@ -108,22 +109,6 @@ try:
 except ImportError:
     MONGODB_AVAILABLE = False
     get_mongodb_service = None
-
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-def safe_int(value, default=None):
-    """Safely convert value to int."""
-    if value is None:
-        return default
-    if isinstance(value, int):
-        return value
-    try:
-        return int(str(value).strip())
-    except (ValueError, TypeError):
-        return default
 
 
 def parse_league_ids(leagues_str: str) -> Optional[List[int]]:
@@ -166,54 +151,6 @@ def calculate_date(days_back: int = 0, base_date: str = None) -> str:
         target = target - timedelta(days=days_back)
     
     return target.strftime("%Y%m%d")
-
-
-# =============================================================================
-# Logging Configuration
-# =============================================================================
-
-def setup_logging(verbose: bool = False):
-    """Configure logging for the daily pipeline."""
-    os.makedirs('logs', exist_ok=True)
-    
-    level = logging.DEBUG if verbose else logging.INFO
-    
-    logging.basicConfig(
-        level=level,
-        handlers=[
-            logging.FileHandler('logs/daily_pipeline.log', mode='a'),
-            logging.StreamHandler(sys.stdout)
-        ],
-        format='%(asctime)s - %(levelname)s - %(filename)s - %(funcName)s - %(message)s',
-    )
-    
-    # Suppress noisy third-party loggers
-    _suppress_noisy_loggers()
-    
-    return logging.getLogger(__name__)
-
-
-def _suppress_noisy_loggers():
-    """
-    Suppress verbose logs from third-party libraries.
-    
-    Selenium-wire logs every HTTP request/response which creates
-    hundreds of log lines just from loading one page.
-    """
-    noisy_loggers = [
-        'seleniumwire.handler',
-        'seleniumwire.server', 
-        'seleniumwire.backend',
-        'seleniumwire.storage',
-        'seleniumwire',
-        'urllib3',
-        'hpack',
-        'selenium.webdriver.remote.remote_connection',
-    ]
-    
-    for logger_name in noisy_loggers:
-        logging.getLogger(logger_name).setLevel(logging.WARNING)
-
 
 
 # =============================================================================
@@ -412,7 +349,7 @@ def run_daily_pipeline(
         logger.error("❌ Failed to capture X-MAS token. Exiting.")
         return stats
     
-    logger.info(f"✅ X-MAS token captured: {x_mas[:30]}...")
+    logger.info(f"✅ X-MAS token captured (length={len(x_mas)})")
     
     # =========================================================================
     # Step 3: Fetch matches for the date
@@ -517,10 +454,14 @@ def run_daily_pipeline(
                 logger.error("❌ Failed to refresh X-MAS token")
                 stats["failed"] += 1
                 continue
-            logger.info(f"✅ Token refreshed: {x_mas[:30]}...")
+            logger.info(f"✅ Token refreshed (length={len(x_mas)})")
             iteration_count = 0
             token_refresh_threshold = random.randint(35, 40)
         
+        # Rate limiting between requests
+        if idx > 1:
+            time.sleep(random.uniform(0.3, 0.7))
+
         # Fetch match details
         try:
             response_data = fetch_match_details(x_mas, match_id)
@@ -773,7 +714,7 @@ Cron Examples:
     args = parser.parse_args()
     
     # Setup logging
-    logger = setup_logging(args.verbose)
+    logger = setup_logging(log_file='logs/daily_pipeline.log', verbose=args.verbose, suppress_noisy=True)
     
     # Calculate the target date
     # --days-back takes precedence over --date

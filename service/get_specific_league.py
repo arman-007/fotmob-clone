@@ -25,6 +25,8 @@ from typing import Optional, List, Dict, Any, Union
 import requests
 
 from service.get_auth_headers import capture_x_mas
+from utils.converters import safe_int
+from utils.http_client import get_fotmob_headers
 
 # MongoDB imports - wrapped in try/except for when running without MongoDB
 try:
@@ -38,18 +40,6 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 URL = os.environ.get("URL")
-
-
-def safe_int(value, default=None):
-    """Safely convert value to int."""
-    if value is None:
-        return default
-    if isinstance(value, int):
-        return value
-    try:
-        return int(str(value).strip())
-    except (ValueError, TypeError):
-        return default
 
 
 def _write_data_to_json(data: dict, filepath: str) -> None:
@@ -209,16 +199,7 @@ def get_specific_league_data(
         'id': league_id,
     }
 
-    headers = {
-        'accept': '*/*',
-        'accept-language': 'en-US,en;q=0.9',
-        'cache-control': 'no-cache',
-        'pragma': 'no-cache',
-        'priority': 'u=1, i',
-        'referer': 'https://www.fotmob.com/',
-        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'x-mas': x_mas,
-    }
+    headers = get_fotmob_headers(x_mas)
 
     # Result structure - will be returned for in-memory use
     result = {

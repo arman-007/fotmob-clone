@@ -94,6 +94,10 @@ from service.get_leagues import get_all_leagues
 from service.get_specific_league import get_specific_league_data
 from service.get_player_stats import get_match_wise_player_stats
 
+# Shared utilities
+from utils.converters import safe_int
+from utils.logging_config import setup_logging
+
 # MongoDB imports - wrapped in try/except for when running without MongoDB
 try:
     from db import get_mongodb_service, MongoDBConfig, get_pipeline_state_manager
@@ -105,45 +109,7 @@ except ImportError:
     get_pipeline_state_manager = None
 
 
-# =============================================================================
-# Logging Configuration
-# =============================================================================
-
-def setup_logging(verbose: bool = False):
-    """Configure logging for the pipeline."""
-    os.makedirs('logs', exist_ok=True)
-    
-    level = logging.DEBUG if verbose else logging.INFO
-    
-    logging.basicConfig(
-        level=level,
-        handlers=[
-            logging.FileHandler('logs/pipeline_log.txt', mode='a'),
-            logging.StreamHandler(sys.stdout)
-        ],
-        format='%(asctime)s - %(levelname)s - %(filename)s - %(funcName)s - %(message)s',
-    )
-    
-    return logging.getLogger(__name__)
-
-
 logger = logging.getLogger(__name__)
-
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-def safe_int(value, default=None):
-    """Safely convert value to int."""
-    if value is None:
-        return default
-    if isinstance(value, int):
-        return value
-    try:
-        return int(str(value).strip())
-    except (ValueError, TypeError):
-        return default
 
 
 def extract_league_ids(league_data: dict, source: str) -> List[int]:
@@ -483,12 +449,13 @@ def run_pipeline(
     logger.info("Capturing X-MAS token...")
     x_mas_token = capture_x_mas()
     if x_mas_token:
-        logger.info(f"✅ X-MAS token captured: {x_mas_token[:30]}...")
+        logger.info(f"✅ X-MAS token captured (length={len(x_mas_token)})")
     else:
         logger.error("❌ Failed to capture X-MAS token. Exiting.")
         return
     
     league_data = get_all_leagues(
+        x_mas=x_mas_token,
         save_to_json=save_to_json,
         save_to_mongodb=save_to_mongodb
     )
@@ -580,7 +547,7 @@ def run_pipeline(
                     state_manager.mark_season_failed(league_id, season_id, "Failed to capture X-MAS token")
                 continue
             
-            logger.info(f"✅ X-MAS token refreshed: {x_mas_token[:30]}...")
+            logger.info(f"✅ X-MAS token refreshed (length={len(x_mas_token)})")
             
             # Determine which matches to process
             if matches_to_retry:
@@ -614,16 +581,26 @@ def run_pipeline(
             # =================================================================
             season_processed = 0
             season_failed = 0
-            
+
+            # Pre-load processed matches set to avoid per-match MongoDB queries
+            processed_matches_set = set()
+            if state_manager and not force and not matches_to_retry:
+                season_state = state_manager.get_season_state(league_id, season_id)
+                if season_state:
+                    processed_matches_set = set(season_state.get("processed_matches", []))
+
             for match_idx, match_id in enumerate(match_ids, 1):
                 # match_id is already int from in-memory data
-                
-                # Skip if already processed (unless force)
-                if state_manager and not force and not matches_to_retry:
-                    if state_manager.is_match_processed(league_id, season_id, match_id):
-                        total_matches_skipped += 1
-                        continue
-                
+
+                # Skip if already processed (using pre-loaded set)
+                if processed_matches_set and match_id in processed_matches_set:
+                    total_matches_skipped += 1
+                    continue
+
+                # Rate limiting between requests
+                if match_idx > 1:
+                    time.sleep(0.5)
+
                 try:
                     result = get_match_wise_player_stats(
                         x_mas=x_mas_token,
@@ -808,7 +785,7 @@ Examples:
     args = parser.parse_args()
     
     # Setup logging
-    setup_logging(args.verbose)
+    setup_logging(log_file='logs/pipeline_log.txt', verbose=args.verbose)
     
     # If --status flag, just show status and exit
     if args.status:

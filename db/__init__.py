@@ -16,7 +16,6 @@ from db.mongodb_service import (
     MongoDBService,
     MongoDBConfig,
     get_mongodb_service,
-    extract_season_from_path,
     parse_datetime,
     safe_int,
     safe_float
@@ -80,7 +79,6 @@ __all__ = [
     "get_pipeline_state_manager",
     
     # Utilities
-    "extract_season_from_path",
     "parse_datetime",
     "safe_int",
     "safe_float"

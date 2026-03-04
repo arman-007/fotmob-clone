@@ -23,24 +23,14 @@ from dotenv import load_dotenv
 
 from service.get_auth_headers import capture_x_mas
 from utils.get_timezone import get_local_time_zone
+from utils.converters import safe_int
+from utils.http_client import get_fotmob_headers
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 URL = os.environ.get("URL")
-
-
-def safe_int(value, default=None):
-    """Safely convert value to int."""
-    if value is None:
-        return default
-    if isinstance(value, int):
-        return value
-    try:
-        return int(str(value).strip())
-    except (ValueError, TypeError):
-        return default
 
 
 def fetch_matches_by_date(
@@ -91,16 +81,7 @@ def fetch_matches_by_date(
         'timezone': str(timezone),
     }
     
-    headers = {
-        'accept': '*/*',
-        'accept-language': 'en-US,en;q=0.9',
-        'cache-control': 'no-cache',
-        'pragma': 'no-cache',
-        'priority': 'u=1, i',
-        'referer': 'https://www.fotmob.com/',
-        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'x-mas': x_mas,
-    }
+    headers = get_fotmob_headers(x_mas)
     
     try:
         logger.info(f"Fetching matches for date: {date}")

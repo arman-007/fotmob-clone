@@ -14,15 +14,14 @@ Updated: Integer IDs version
 
 import os
 import logging
-import re
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Tuple
 from contextlib import contextmanager
 
 from pymongo import MongoClient, ASCENDING, DESCENDING, TEXT, UpdateOne
 from pymongo.errors import (
-    DuplicateKeyError, 
-    BulkWriteError, 
+    DuplicateKeyError,
+    BulkWriteError,
     ConnectionFailure,
     ServerSelectionTimeoutError
 )
@@ -623,14 +622,14 @@ class MongoDBService:
     # =========================================================================
     
     def get_collection_stats(self) -> Dict[str, int]:
-        """Get document counts for all collections."""
+        """Get estimated document counts for all collections (fast, metadata-based)."""
         return {
-            "leagues": self.leagues.count_documents({}),
-            "seasons": self.seasons.count_documents({}),
-            "matches": self.matches.count_documents({}),
-            "player_stats": self.player_stats.count_documents({}),
-            "players": self.players.count_documents({}),
-            "teams": self.teams.count_documents({})
+            "leagues": self.leagues.estimated_document_count(),
+            "seasons": self.seasons.estimated_document_count(),
+            "matches": self.matches.estimated_document_count(),
+            "player_stats": self.player_stats.estimated_document_count(),
+            "players": self.players.estimated_document_count(),
+            "teams": self.teams.estimated_document_count()
         }
     
     def clear_all_collections(self, confirm: bool = False):
@@ -663,71 +662,5 @@ def get_mongodb_service(config: MongoDBConfig = None) -> MongoDBService:
     return MongoDBService(config)
 
 
-def extract_season_from_path(filepath: str) -> Optional[str]:
-    """
-    Extract season ID from filepath.
-    
-    Handles formats like:
-    - 2024-2025 (full year range)
-    - 2024-25 (short year range)
-    - 2024 (single year, e.g., World Cup)
-    
-    Returns the season ID as found in the path.
-    """
-    # First try to match full year range (2024-2025)
-    match = re.search(r'(\d{4}-\d{4})', filepath)
-    if match:
-        return match.group(1)
-    
-    # Then try short year range (2024-25)
-    match = re.search(r'(\d{4}-\d{2})', filepath)
-    if match:
-        return match.group(1)
-    
-    # Finally try single year (2024)
-    match = re.search(r'/(\d{4})/', filepath)
-    if match:
-        return match.group(1)
-    
-    return None
-
-
-def parse_datetime(dt_string: str) -> Optional[datetime]:
-    """Parse datetime string to datetime object."""
-    if not dt_string:
-        return None
-    
-    formats = [
-        "%Y-%m-%dT%H:%M:%S.%fZ",
-        "%Y-%m-%dT%H:%M:%SZ",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d"
-    ]
-    
-    for fmt in formats:
-        try:
-            return datetime.strptime(dt_string, fmt)
-        except ValueError:
-            continue
-    
-    return None
-
-
-def safe_int(value: Any, default: int = 0) -> int:
-    """Safely convert value to int."""
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return default
-
-
-def safe_float(value: Any, default: float = None) -> Optional[float]:
-    """Safely convert value to float."""
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return default
+# Re-export from utils.converters for backwards compatibility
+from utils.converters import safe_int, safe_float, parse_datetime

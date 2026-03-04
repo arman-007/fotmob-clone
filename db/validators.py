@@ -17,28 +17,7 @@ from typing import Optional, List, Any, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 import re
 
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-def safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
-    """Safely convert a value to integer."""
-    if value is None:
-        return default
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return default
-        try:
-            return int(value)
-        except ValueError:
-            return default
-    if isinstance(value, float):
-        return int(value)
-    return default
+from utils.converters import safe_int
 
 
 # =============================================================================

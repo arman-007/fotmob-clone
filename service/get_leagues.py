@@ -25,6 +25,8 @@ from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 
 from service.get_auth_headers import capture_x_mas
+from utils.converters import safe_int
+from utils.http_client import get_fotmob_headers
 
 # MongoDB imports - wrapped in try/except for when running without MongoDB
 try:
@@ -36,18 +38,6 @@ except ImportError:
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-
-
-def safe_int(value, default=None):
-    """Safely convert value to int."""
-    if value is None:
-        return default
-    if isinstance(value, int):
-        return value
-    try:
-        return int(str(value).strip())
-    except (ValueError, TypeError):
-        return default
 
 
 def _save_leagues_to_json(leagues_data: dict, output_dir: str = 'output') -> None:
@@ -163,6 +153,7 @@ def _save_leagues_to_mongodb(leagues_data: dict) -> dict:
 
 
 def get_all_leagues(
+    x_mas: str = None,
     save_to_json: bool = True,
     save_to_mongodb: bool = True
 ) -> Optional[Dict[str, Any]]:
@@ -189,21 +180,17 @@ def get_all_leagues(
         logger.error("URL environment variable is not set.")
         return None
     
-    # Get fresh X-MAS token
-    x_mas = capture_x_mas()
-    
+    # Get X-MAS token (use provided or capture fresh)
+    if not x_mas:
+        x_mas = capture_x_mas()
+
     if not x_mas:
         logger.error("Failed to capture X-MAS token")
         return None
-    
-    url = f"{URL}/allLeagues?locale=en&country=BGD"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-        'Accept': '*/*',
-        'accept-language': 'en-US,en;q=0.9',
-        'accept-encoding': 'gzip, deflate, br, zstd',
-        'x-mas': x_mas
-    }
+
+    country_code = os.environ.get("CCODE3", "BGD")
+    url = f"{URL}/allLeagues?locale=en&country={country_code}"
+    headers = get_fotmob_headers(x_mas)
     
     try:
         logger.info("Fetching leagues data from FotMob API")

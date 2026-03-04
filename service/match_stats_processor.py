@@ -25,47 +25,15 @@ import requests
 from dotenv import load_dotenv
 
 from get_additional_stats import process_additional_stats
+from utils.converters import safe_int, safe_float, parse_datetime, determine_season_from_date
+from utils.http_client import get_fotmob_headers
 
 # MongoDB imports - wrapped in try/except for when running without MongoDB
 try:
-    from db import (
-        get_mongodb_service,
-        parse_datetime,
-        safe_int,
-        safe_float
-    )
+    from db import get_mongodb_service
     MONGODB_AVAILABLE = True
 except ImportError:
     MONGODB_AVAILABLE = False
-    
-    def parse_datetime(dt_string):
-        if not dt_string:
-            return None
-        for fmt in ["%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"]:
-            try:
-                return datetime.strptime(dt_string, fmt)
-            except ValueError:
-                continue
-        return None
-    
-    def safe_int(value, default=None):
-        """Safely convert value to int."""
-        if value is None:
-            return default
-        if isinstance(value, int):
-            return value
-        try:
-            return int(str(value).strip())
-        except (ValueError, TypeError):
-            return default
-    
-    def safe_float(value, default=None):
-        if value is None:
-            return default
-        try:
-            return float(value)
-        except (ValueError, TypeError):
-            return default
 
 load_dotenv()
 
@@ -99,17 +67,8 @@ def fetch_match_details(x_mas: str, match_id: Union[int, str]) -> Optional[dict]
     
     url = f"{URL}/matchDetails"
     params = {'matchId': match_id}  # API accepts both int and str
-    
-    headers = {
-        'accept': '*/*',
-        'accept-language': 'en-US,en;q=0.9',
-        'cache-control': 'no-cache',
-        'pragma': 'no-cache',
-        'priority': 'u=1, i',
-        'referer': 'https://www.fotmob.com/',
-        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'x-mas': x_mas,
-    }
+
+    headers = get_fotmob_headers(x_mas)
     
     try:
         response = requests.get(url, params=params, headers=headers, timeout=15)
@@ -345,7 +304,7 @@ def save_match_to_mongodb(
     
     # For daily pipeline, we may not have season_id - try to determine it
     if not season_id:
-        season_id = _determine_season_from_date(match_data.get("match_date_time_UTC"))
+        season_id = determine_season_from_date(match_data.get("match_date_time_UTC"))
     
     league_season_key = f"{league_id}_{season_id}" if league_id and season_id else ""
     
@@ -553,43 +512,6 @@ def _update_match_metadata_only(mongo, match_id: int, match_data: dict) -> None:
         logger.debug(f"Updated metadata only for match {match_id}")
     except Exception as e:
         logger.error(f"Error updating match metadata: {e}")
-
-
-def _determine_season_from_date(date_string: str) -> str:
-    """
-    Determine season ID from match date.
-    
-    Football seasons typically run Aug-May, so:
-    - Aug 2024 - May 2025 = "2024-2025"
-    - Aug 2023 - May 2024 = "2023-2024"
-    
-    Args:
-        date_string: ISO format date string
-        
-    Returns:
-        Season ID string (e.g., "2024-2025")
-    """
-    if not date_string:
-        # Default to current season
-        now = datetime.now()
-        year = now.year
-        month = now.month
-    else:
-        dt = parse_datetime(date_string)
-        if not dt:
-            now = datetime.now()
-            year = now.year
-            month = now.month
-        else:
-            year = dt.year
-            month = dt.month
-    
-    # If month is Aug-Dec, season is year/year+1
-    # If month is Jan-Jul, season is year-1/year
-    if month >= 8:  # Aug-Dec
-        return f"{year}-{year + 1}"
-    else:  # Jan-Jul
-        return f"{year - 1}-{year}"
 
 
 # =============================================================================

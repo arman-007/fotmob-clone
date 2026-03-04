@@ -13,30 +13,9 @@ from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
+from utils.logging_config import suppress_noisy_loggers
+
 logger = logging.getLogger(__name__)
-
-
-def _suppress_selenium_wire_logs():
-    """
-    Suppress verbose selenium-wire logs.
-    
-    These loggers spam the console with every HTTP request/response
-    made by the browser (CSS, JS, images, ads, etc.)
-    """
-    # Suppress selenium-wire's internal loggers
-    logging.getLogger('seleniumwire.handler').setLevel(logging.WARNING)
-    logging.getLogger('seleniumwire.server').setLevel(logging.WARNING)
-    logging.getLogger('seleniumwire.backend').setLevel(logging.WARNING)
-    logging.getLogger('seleniumwire.storage').setLevel(logging.WARNING)
-    logging.getLogger('seleniumwire').setLevel(logging.WARNING)
-    
-    # Also suppress urllib3 and hpack (used by selenium-wire)
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
-    logging.getLogger('hpack').setLevel(logging.WARNING)
-    
-    # Suppress selenium and geckodriver logs
-    logging.getLogger('selenium').setLevel(logging.WARNING)
-    logging.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
 
 
 def _create_firefox_driver(seleniumwire_options: dict):
@@ -134,7 +113,7 @@ def capture_x_mas(url="https://www.fotmob.com/", max_retries=3, retry_delay=5):
         X-MAS token string or None if not captured
     """
     # Suppress verbose logging before initializing driver
-    _suppress_selenium_wire_logs()
+    suppress_noisy_loggers()
     
     # Selenium-wire options
     seleniumwire_options = {
