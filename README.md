@@ -1,6 +1,6 @@
 # ⚽ Football Stats Pipeline
 
-A robust, production-ready data pipeline for fetching and storing comprehensive football (soccer) statistics from FotMob API. Designed for Fantasy Premier League-style applications with MongoDB integration, checkpoint/resume functionality, and flexible query helpers.
+A robust, production-ready data pipeline for fetching and storing comprehensive football (soccer) statistics from FotMob API. Features both **historical data ingestion** and **daily incremental updates**, designed for Fantasy Premier League-style applications with MongoDB integration.
 
 ![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
 ![MongoDB](https://img.shields.io/badge/MongoDB-6.0+-green.svg)
@@ -17,6 +17,8 @@ A robust, production-ready data pipeline for fetching and storing comprehensive 
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
+  - [Historical Pipeline](#historical-pipeline)
+  - [Daily Pipeline](#daily-pipeline)
 - [Database Schema](#database-schema)
 - [Query Helpers API](#query-helpers-api)
 - [Project Structure](#project-structure)
@@ -28,12 +30,14 @@ A robust, production-ready data pipeline for fetching and storing comprehensive 
 
 ## 🎯 Overview
 
-The Football Stats Pipeline is a comprehensive data ingestion system that:
+The Football Stats Pipeline is a comprehensive data ingestion system with **two complementary pipelines**:
 
-- **Fetches** league, season, match, and player statistics from FotMob
-- **Stores** data in MongoDB with optimized schema for Fantasy PL-style queries
-- **Supports** checkpoint/resume for handling interruptions gracefully
-- **Provides** ready-to-use query helpers for building web applications
+| Pipeline | Purpose | Use Case |
+|----------|---------|----------|
+| **Historical Pipeline** (`pipeline.py`) | Bulk fetch historical data | Initial database population, backfilling seasons |
+| **Daily Pipeline** (`daily_pipeline.py`) | Incremental daily updates | Keeping data current, daily cron jobs |
+
+Both pipelines share the same MongoDB schema and modules, ensuring data consistency.
 
 ### Use Cases
 
@@ -42,6 +46,7 @@ The Football Stats Pipeline is a comprehensive data ingestion system that:
 - Player performance tracking systems
 - Historical football data analysis
 - Machine learning datasets for sports predictions
+- Live match day statistics
 
 ---
 
@@ -53,19 +58,24 @@ The Football Stats Pipeline is a comprehensive data ingestion system that:
 |---------|-------------|
 | **Multi-League Support** | Fetches data from 500+ leagues worldwide |
 | **Historical Data** | Retrieves up to 10 seasons per league |
+| **Daily Updates** | Incremental updates for current matches |
 | **Player Statistics** | Comprehensive stats including goals, assists, ratings, cards |
 | **Match Details** | Full match information with player-level granularity |
 | **Team Data** | Team profiles with aggregated statistics |
 
 ### Pipeline Features
 
-| Feature | Description |
-|---------|-------------|
-| **Checkpoint/Resume** | Automatically resumes from where it stopped |
-| **Failed Match Retry** | Tracks and retries failed matches |
-| **Progress Tracking** | Real-time progress monitoring via `--status` |
-| **Dual Storage** | JSON files (debugging) + MongoDB (production) |
-| **Flexible Execution** | Multiple CLI flags for customization |
+| Feature | Historical | Daily |
+|---------|:----------:|:-----:|
+| Checkpoint/Resume | ✅ | - |
+| Failed Match Retry | ✅ | - |
+| League Filtering | ✅ | ✅ |
+| Date Selection | - | ✅ |
+| Match Status Filtering | - | ✅ |
+| Dry Run Mode | - | ✅ |
+| Safe Updates | - | ✅ |
+| Progress Tracking | ✅ | ✅ |
+| Dual Storage (JSON + MongoDB) | ✅ | ✅ |
 
 ### Query Features
 
@@ -84,45 +94,72 @@ The Football Stats Pipeline is a comprehensive data ingestion system that:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        PIPELINE FLOW                            │
+│                     DUAL PIPELINE SYSTEM                        │
 └─────────────────────────────────────────────────────────────────┘
 
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│   FotMob     │───▶│   Pipeline   │───▶│   MongoDB    │
-│     API      │    │  Orchestrator│    │   Database   │
-└──────────────┘    └──────────────┘    └──────────────┘
-                           │
-                           ▼
-                    ┌──────────────┐
-                    │  JSON Files  │
-                    │  (Optional)  │
-                    └──────────────┘
+                    ┌──────────────────┐
+                    │   FotMob API     │
+                    └────────┬─────────┘
+                             │
+            ┌────────────────┴────────────────┐
+            │                                 │
+            ▼                                 ▼
+   ┌─────────────────┐               ┌─────────────────┐
+   │   Historical    │               │     Daily       │
+   │   Pipeline      │               │    Pipeline     │
+   │  (pipeline.py)  │               │(daily_pipeline) │
+   └────────┬────────┘               └────────┬────────┘
+            │                                 │
+            │    ┌─────────────────────┐      │
+            └───►│  Shared Modules     │◄─────┘
+                 │  - mongodb_service  │
+                 │  - validators       │
+                 │  - match_processor  │
+                 └──────────┬──────────┘
+                            │
+               ┌────────────┴────────────┐
+               ▼                         ▼
+        ┌──────────────┐          ┌──────────────┐
+        │   MongoDB    │          │  JSON Files  │
+        │  (Primary)   │          │  (Optional)  │
+        └──────────────┘          └──────────────┘
+```
 
-┌─────────────────────────────────────────────────────────────────┐
-│                      DATA FLOW                                  │
-└─────────────────────────────────────────────────────────────────┘
+### Data Flow - Historical Pipeline
 
-1. Capture X-MAS Token ──▶ Authentication for API requests
+```
+1. Capture X-MAS Token ──► Authentication for API requests
            │
            ▼
-2. Fetch All Leagues ────▶ 537 leagues from 200+ countries
+2. Fetch All Leagues ────► 537 leagues from 200+ countries
            │
            ▼
 3. For Each League:
-   ├── Fetch Season Data ──▶ Last 10 seasons
+   ├── Fetch Season Data ──► Last 10 seasons
    │          │
    │          ▼
    └── For Each Season:
-       ├── Get Match IDs ──▶ 380+ matches per season
+       ├── Get Match IDs ──► 380+ matches per season
        │          │
        │          ▼
        └── For Each Match:
-           └── Fetch Player Stats ──▶ 22+ players per match
-                      │
-                      ▼
-              ┌───────┴───────┐
-              ▼               ▼
-         MongoDB          JSON Files
+           └── Fetch Player Stats ──► 22+ players per match
+```
+
+### Data Flow - Daily Pipeline
+
+```
+1. Capture X-MAS Token ──► Authentication
+           │
+           ▼
+2. Fetch Matches by Date ──► All matches for specified date
+           │
+           ▼
+3. Filter Matches ──► By status (finished/started) and league
+           │
+           ▼
+4. For Each Match:
+   └── Fetch & Save Player Stats ──► Safe update to MongoDB
 ```
 
 ---
@@ -146,6 +183,7 @@ python-dotenv>=1.0.0
 selenium-wire>=5.1.0
 selenium>=4.15.0
 tzlocal>=5.2
+brotli>=1.1.0
 ```
 
 ---
@@ -238,10 +276,14 @@ MONGODB_DATABASE=football_stats
 
 ## 📖 Usage
 
-### Basic Commands
+### Historical Pipeline
+
+The historical pipeline (`pipeline.py`) is designed for **bulk data ingestion** - fetching multiple seasons of historical data across many leagues.
+
+#### Basic Commands
 
 ```bash
-# Run pipeline (default: save to both JSON and MongoDB)
+# Run pipeline with default settings (JSON + MongoDB)
 python pipeline.py
 
 # Check pipeline progress
@@ -253,36 +295,36 @@ python pipeline.py --no-json
 # Process limited leagues (for testing)
 python pipeline.py --league-limit 2
 
-# Force re-process all data
+# Force re-process all data (ignore checkpoints)
 python pipeline.py --force
 
-# Retry only failed matches
+# Retry only previously failed matches
 python pipeline.py --retry-failed
 
-# Build player profiles after ingestion
+# Build aggregated player profiles after ingestion
 python pipeline.py --build-players
 ```
 
-### CLI Options Reference
+#### CLI Options Reference
 
-| Flag | Description | Example |
+| Flag | Description | Default |
 |------|-------------|---------|
-| `--no-json` | Skip saving JSON files | `python pipeline.py --no-json` |
-| `--no-mongodb` | Skip MongoDB (JSON only) | `python pipeline.py --no-mongodb` |
-| `--league-limit N` | Process only N leagues | `python pipeline.py --league-limit 5` |
-| `--force` | Ignore checkpoints, re-process all | `python pipeline.py --force` |
-| `--retry-failed` | Only retry failed matches | `python pipeline.py --retry-failed` |
-| `--status` | Show progress and exit | `python pipeline.py --status` |
-| `--build-players` | Build player profiles | `python pipeline.py --build-players` |
-| `-d, --date` | Date parameter | `python pipeline.py -d 20241213` |
+| `--no-json` | Skip saving JSON files (faster) | `False` |
+| `--no-mongodb` | Skip MongoDB, JSON only (debugging) | `False` |
+| `--league-limit N` | Process only first N leagues | All leagues |
+| `--force` | Ignore checkpoints, re-process all | `False` |
+| `--retry-failed` | Only retry previously failed matches | `False` |
+| `--status` | Show progress status and exit | - |
+| `--build-players` | Build aggregated player profiles | `False` |
+| `-d, --date` | Date parameter (YYYYMMDD) | Today |
 
-### Combined Examples
+#### Example Workflows
 
 ```bash
-# Production run: no JSON, all leagues
+# Initial setup: Full historical data load
 python pipeline.py --no-json
 
-# Development: 2 leagues, with JSON for debugging
+# Development: Test with 2 leagues
 python pipeline.py --league-limit 2
 
 # Resume after interruption (automatic)
@@ -291,11 +333,11 @@ python pipeline.py
 # Full re-run with player profiles
 python pipeline.py --force --build-players
 
-# Check status and database stats
+# Check progress
 python pipeline.py --status
 ```
 
-### Status Output Example
+#### Status Output Example
 
 ```
 ============================================================
@@ -314,22 +356,236 @@ PIPELINE PROGRESS STATUS
    ⚠️ partially_completed: 3 seasons
    ❌ failed: 2 seasons
 
-❌ Failed Matches (first 10):
-   - League 47, Season 2024-2025, Match 4521342
-     Error: 403 Client Error: Forbidden...
+============================================================
+```
 
+---
+
+### Daily Pipeline
+
+The daily pipeline (`daily_pipeline.py`) is designed for **incremental updates** - fetching matches for a specific date to keep your database current.
+
+#### Basic Commands
+
+```bash
+# Fetch today's matches
+python daily_pipeline.py
+
+# Fetch matches for a specific date
+python daily_pipeline.py -d 20241215
+
+# Filter by specific leagues (Premier League, La Liga, Bundesliga)
+python daily_pipeline.py --leagues 47,87,54
+
+# Only process finished matches
+python daily_pipeline.py --finished-only
+
+# Preview what would be processed (no changes)
+python daily_pipeline.py --dry-run
+
+# Show match summary for a date
+python daily_pipeline.py --status
+
+# Skip JSON output (faster)
+python daily_pipeline.py --no-json
+
+# Test with limited matches
+python daily_pipeline.py --match-limit 10 -v
+```
+
+#### CLI Options Reference
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-d, --date` | Date to fetch (YYYYMMDD format) | Today |
+| `--leagues` | Comma-separated league IDs to filter | All leagues |
+| `--no-json` | Skip saving JSON files | `False` |
+| `--no-mongodb` | Skip saving to MongoDB | `False` |
+| `--output-dir` | Output directory for JSON files | `output/daily` |
+| `--finished-only` | Only process finished matches | `False` |
+| `--started-only` | Only process started/in-progress matches | `False` |
+| `--match-limit N` | Limit number of matches (for testing) | No limit |
+| `--dry-run` | Preview without processing | `False` |
+| `--status` | Show match summary and exit | - |
+| `--force` | Bypass safety checks, force update | `False` |
+| `-v, --verbose` | Enable verbose/debug logging | `False` |
+
+#### Flag Details
+
+##### `-d, --date`
+Specify the date to fetch matches for in `YYYYMMDD` format.
+
+```bash
+python daily_pipeline.py -d 20241225  # Christmas Day matches
+python daily_pipeline.py --date 20240101  # New Year's Day
+```
+
+##### `--leagues`
+Filter matches by specific league IDs. Useful for focusing on specific competitions.
+
+```bash
+# Premier League only
+python daily_pipeline.py --leagues 47
+
+# Multiple leagues
+python daily_pipeline.py --leagues 47,87,54,53
+
+# Common league IDs:
+#   47  = Premier League (England)
+#   87  = La Liga (Spain)
+#   54  = Bundesliga (Germany)
+#   53  = Serie A (Italy)
+#   55  = Ligue 1 (France)
+#   42  = Champions League
+```
+
+##### `--finished-only`
+Only process matches that have finished. Useful for ensuring complete player statistics.
+
+```bash
+# End of day run - only completed matches
+python daily_pipeline.py --finished-only
+```
+
+##### `--started-only`
+Only process matches that have started (includes in-progress and finished). Skips scheduled matches.
+
+```bash
+# During match day - get live/completed stats
+python daily_pipeline.py --started-only
+```
+
+##### `--dry-run`
+Preview what would be processed without making any changes. Great for testing filters.
+
+```bash
+python daily_pipeline.py -d 20241215 --finished-only --dry-run
+```
+
+Output:
+```
+🔍 DRY RUN - Would process the following matches:
+  ✅ 4813566 - Premier League
+  ✅ 4813567 - La Liga
+  ✅ 4813568 - Serie A
+  ... and 35 more
+```
+
+##### `--status`
+Display match summary for the date without processing anything.
+
+```bash
+python daily_pipeline.py -d 20241215 --status
+```
+
+Output:
+```
+============================================================
+DAILY MATCH STATUS FOR 20241215
 ============================================================
 
-==================================================
-DATABASE STATISTICS
-==================================================
-  leagues: 537 documents
-  seasons: 450 documents
-  matches: 12,450 documents
-  player_stats: 498,000 documents
-  players: 25,000 documents
-  teams: 1,200 documents
-==================================================
+📊 Summary:
+   Total Leagues: 45
+   Total Matches: 128
+
+📈 By Status:
+   ⏳ Not Started: 23
+   🔄 In Progress: 5
+   ✅ Finished: 100
+
+🏆 Top Leagues (by match count):
+   Premier League: 10 matches
+   La Liga: 10 matches
+   Serie A: 10 matches
+   ...
+============================================================
+```
+
+##### `--force`
+Bypass safety checks and force update existing records. Use with caution.
+
+```bash
+# Re-process all matches for a date, overwriting existing data
+python daily_pipeline.py -d 20241215 --force
+```
+
+##### `--match-limit`
+Limit the number of matches to process. Useful for testing.
+
+```bash
+# Test with just 5 matches
+python daily_pipeline.py --match-limit 5 -v
+```
+
+##### `-v, --verbose`
+Enable debug-level logging for troubleshooting.
+
+```bash
+python daily_pipeline.py -v
+```
+
+#### Example Workflows
+
+```bash
+# Morning cron job: Yesterday's completed matches
+python daily_pipeline.py -d $(date -d "yesterday" +%Y%m%d) --finished-only --no-json
+
+# Live match day: All started matches
+python daily_pipeline.py --started-only
+
+# End of day: All finished matches for today
+python daily_pipeline.py --finished-only
+
+# Specific league focus
+python daily_pipeline.py --leagues 47 --finished-only
+
+# Testing new setup
+python daily_pipeline.py --match-limit 5 --dry-run -v
+```
+
+#### Output Example
+
+```
+============================================================
+DAILY PIPELINE COMPLETE
+============================================================
+Date: 20241215
+Total matches found: 128
+Matches processed: 100
+Matches skipped: 25
+Matches failed: 3
+
+⏭️  Skipped Matches (25):
+
+   Not Finished (25):
+     - 4813590 (Premier League)
+     - 4813591 (La Liga)
+     - 4813592 (Bundesliga)
+     ... and 22 more
+
+❌ Failed Matches (3):
+   - 4813580 (Champions League): No data returned from API
+   - 4813581 (Europa League): Failed to process response
+   - 4813582 (MLS): Connection timeout
+
+MongoDB - Matches saved: 100
+MongoDB - Player stats saved: 2245
+
+Duration: 125.34 seconds
+============================================================
+```
+
+#### Cron Job Setup
+
+```bash
+# Add to crontab for automatic daily updates
+crontab -e
+
+# Run at 6 AM daily - fetch yesterday's finished matches
+0 6 * * * cd /path/to/football-stats-pipeline && /path/to/venv/bin/python daily_pipeline.py -d $(date -d "yesterday" +\%Y\%m\%d) --finished-only --no-json >> logs/cron.log 2>&1
+
+# Run every 2 hours during match days (weekends)
+0 */2 * * 0,6 cd /path/to/football-stats-pipeline && /path/to/venv/bin/python daily_pipeline.py --finished-only --no-json >> logs/cron.log 2>&1
 ```
 
 ---
@@ -342,27 +598,13 @@ DATABASE STATISTICS
 |------------|---------|------------|
 | `leagues` | League metadata | `league_id`, `name`, `country_code` |
 | `seasons` | Season information | `league_season_key`, `league_id`, `season_id` |
-| `matches` | Match details | `match_id`, `home_team`, `away_team`, `player_stats` |
-| `player_stats` | Per-match player stats | `player_match_key`, `player_id`, `match_id` |
+| `matches` | Match details with embedded player stats | `match_id`, `home_team`, `away_team`, `player_stats` |
+| `player_stats` | Flattened per-match player stats | `player_match_key`, `player_id`, `match_id` |
 | `players` | Aggregated player profiles | `player_id`, `total_goals`, `total_assists` |
 | `teams` | Team information | `team_id`, `name` |
-| `pipeline_state` | Checkpoint tracking | `league_id`, `season_id`, `status` |
+| `pipeline_state` | Historical pipeline checkpoints | `league_id`, `season_id`, `status` |
 
 ### Sample Documents
-
-#### leagues
-```javascript
-{
-  "league_id": "47",
-  "name": "Premier League",
-  "localized_name": "Premier League",
-  "country_code": "ENG",
-  "page_url": "https://www.fotmob.com/leagues/47/overview/premier-league",
-  "category": "popular",
-  "created_at": ISODate("2024-12-13T10:00:00Z"),
-  "updated_at": ISODate("2024-12-13T10:00:00Z")
-}
-```
 
 #### player_stats
 ```javascript
@@ -390,19 +632,31 @@ DATABASE STATISTICS
 }
 ```
 
-#### pipeline_state
+#### matches
 ```javascript
 {
-  "_id": "47_2024-2025",
+  "match_id": "4521342",
   "league_id": "47",
   "season_id": "2024-2025",
-  "status": "completed",
-  "total_matches": 380,
-  "processed_matches": ["4521342", "4521343", ...],
-  "failed_matches": [],
-  "started_at": ISODate("2024-12-13T10:00:00Z"),
-  "completed_at": ISODate("2024-12-13T12:30:00Z"),
-  "last_updated": ISODate("2024-12-13T12:30:00Z")
+  "league_season_key": "47_2024-2025",
+  "match_name": "Liverpool vs Everton",
+  "match_datetime_utc": ISODate("2024-12-07T15:00:00Z"),
+  "started": true,
+  "finished": true,
+  "home_team": {
+    "team_id": "8650",
+    "name": "Liverpool"
+  },
+  "away_team": {
+    "team_id": "8455",
+    "name": "Everton"
+  },
+  "player_stats": [...],  // Embedded array
+  "stats_summary": {
+    "total_goals": 3,
+    "total_yellow_cards": 4,
+    "total_red_cards": 0
+  }
 }
 ```
 
@@ -518,42 +772,51 @@ teams = queries.search_teams("Liverpool", limit=20)
 ```
 football-stats-pipeline/
 │
-├── pipeline.py              # Main orchestration script
-├── get_additional_stats.py  # Additional stats processor
-├── requirements.txt         # Python dependencies
-├── .env                     # Environment configuration
-├── .env.example             # Example environment file
-├── README.md                # This file
+├── pipeline.py               # Historical data pipeline
+├── daily_pipeline.py         # Daily incremental updates pipeline
+├── get_additional_stats.py   # Additional stats processor
+├── requirements.txt          # Python dependencies
+├── .env                      # Environment configuration
+├── .env.example              # Example environment file
+├── README.md                 # This file
 │
-├── service/                 # API interaction modules
+├── service/                  # API interaction modules
 │   ├── __init__.py
-│   ├── get_auth_headers.py  # X-MAS token capture
-│   ├── get_leagues.py       # League fetching
-│   ├── get_specific_league.py  # Season data fetching
-│   └── get_player_stats.py  # Player stats fetching
+│   ├── get_auth_headers.py   # X-MAS token capture
+│   ├── get_leagues.py        # League fetching
+│   ├── get_specific_league.py    # Season data fetching
+│   ├── get_player_stats.py       # Player stats (historical)
+│   ├── get_daily_matches.py      # Daily match fetching
+│   └── match_stats_processor.py  # Shared match processing
 │
-├── db/                      # Database modules
+├── db/                       # Database modules
 │   ├── __init__.py
-│   ├── mongodb_service.py   # MongoDB operations
-│   ├── validators.py        # Pydantic validators
-│   ├── query_helpers.py     # Query helper functions
-│   └── pipeline_state.py    # Checkpoint/resume system
+│   ├── mongodb_service.py    # MongoDB operations
+│   ├── validators.py         # Pydantic validators
+│   ├── query_helpers.py      # Query helper functions
+│   └── pipeline_state.py     # Checkpoint/resume system
 │
-├── utils/                   # Utility modules
+├── utils/                    # Utility modules
 │   ├── __init__.py
 │   ├── get_all_season_match_ids.py  # Match ID extraction
-│   └── get_timezone.py      # Timezone utilities
+│   └── get_timezone.py       # Timezone utilities
 │
-├── logs/                    # Log files
-│   └── pipeline_log.txt
+├── logs/                     # Log files
+│   ├── pipeline_log.txt      # Historical pipeline logs
+│   └── daily_pipeline.log    # Daily pipeline logs
 │
-└── output/                  # JSON output (optional)
-    └── leagues/
-        └── {league_id}/
-            └── {season}/
-                ├── league_info_*.json
-                └── player_stats/
-                    └── player_stats_matchID_*.json
+└── output/                   # JSON output (optional)
+    ├── leagues/              # Historical data
+    │   └── {league_id}/
+    │       └── {season}/
+    │           ├── league_info_*.json
+    │           └── player_stats/
+    │               └── player_stats_matchID_*.json
+    └── daily/                # Daily data
+        └── {date}/
+            ├── matches_{date}.json
+            └── player_stats/
+                └── match_{match_id}.json
 ```
 
 ---
@@ -592,14 +855,19 @@ sudo systemctl start mongod
 mongosh --eval "db.adminCommand('ping')"
 ```
 
-#### 3. Season Validation Errors
+#### 3. No Matches Found for Date
 
-**Cause**: Season format mismatch
+**Cause**: Wrong date format or no matches scheduled
 
-**Solution**: The pipeline now supports all formats:
-- `2024-2025` (full year range)
-- `2024-25` (short year range)
-- `2024` (single year - World Cup, etc.)
+**Solution**:
+```bash
+# Use correct format YYYYMMDD
+python daily_pipeline.py -d 20241215  # ✅ Correct
+python daily_pipeline.py -d 2024-12-15  # ❌ Wrong
+
+# Check status first
+python daily_pipeline.py -d 20241215 --status
+```
 
 #### 4. Pipeline Interrupted
 
@@ -607,23 +875,24 @@ mongosh --eval "db.adminCommand('ping')"
 
 **Solution**:
 ```bash
-# Just run again - it will resume automatically
+# Historical pipeline: Just run again - it will resume automatically
 python pipeline.py
 
 # Check progress
 python pipeline.py --status
+
+# Daily pipeline: Re-run for the same date
+python daily_pipeline.py -d 20241215
 ```
 
-#### 5. Out of Memory
+#### 5. Safe Update Blocked
 
-**Cause**: Processing too many leagues at once
+**Cause**: Daily pipeline detected existing data, won't overwrite
 
 **Solution**:
 ```bash
-# Process in batches
-python pipeline.py --league-limit 10
-# Run again for next batch (automatic resume)
-python pipeline.py --league-limit 20
+# Use --force to override (use with caution)
+python daily_pipeline.py -d 20241215 --force
 ```
 
 ### Logs
@@ -631,14 +900,16 @@ python pipeline.py --league-limit 20
 Check logs for detailed error information:
 
 ```bash
-# View recent logs
+# Historical pipeline logs
 tail -100 logs/pipeline_log.txt
-
-# Search for errors
 grep -i error logs/pipeline_log.txt
 
-# Search for specific league
-grep "league 47" logs/pipeline_log.txt
+# Daily pipeline logs
+tail -100 logs/daily_pipeline.log
+grep -i error logs/daily_pipeline.log
+
+# Search for specific match
+grep "4813566" logs/daily_pipeline.log
 ```
 
 ---

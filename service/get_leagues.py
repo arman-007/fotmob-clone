@@ -5,6 +5,9 @@ Fetches all leagues from FotMob API and stores them in:
 1. JSON file (for debugging/backup)
 2. MongoDB (primary storage)
 
+Updated: Integer IDs version
+- league_id is now stored as int
+
 The JSON saving is kept for debugging purposes but can be commented out
 to reduce computational overhead.
 """
@@ -29,6 +32,16 @@ except ImportError:
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_int(value, default=None):
+    """Safely convert value to int."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
 
 
 def _save_leagues_to_json(leagues_data: dict, output_dir: str = 'output') -> None:
@@ -75,12 +88,18 @@ def _save_leagues_to_mongodb(leagues_data: dict) -> dict:
     
     # Process popular leagues
     for league in leagues_data.get("popular", []):
+        league_id = _safe_int(league.get("id"))
+        if league_id is None:
+            logger.warning(f"Skipping league with invalid id: {league.get('id')}")
+            stats["errors"] += 1
+            continue
+        
         page_url = league.get("pageUrl", "")
         if page_url and not page_url.startswith("http"):
             page_url = f"{FOTMOB_BASE_URL}{page_url}"
         
         leagues_to_insert.append({
-            "league_id": str(league["id"]),
+            "league_id": league_id,  # Now int
             "name": league["name"],
             "localized_name": league.get("localizedName", league["name"]),
             "country_code": league.get("ccode", ""),
@@ -90,12 +109,17 @@ def _save_leagues_to_mongodb(leagues_data: dict) -> dict:
     
     # Process international leagues
     for league in leagues_data.get("international", []):
+        league_id = _safe_int(league.get("id"))
+        if league_id is None:
+            stats["errors"] += 1
+            continue
+        
         page_url = league.get("pageUrl", "")
         if page_url and not page_url.startswith("http"):
             page_url = f"{FOTMOB_BASE_URL}{page_url}"
         
         leagues_to_insert.append({
-            "league_id": str(league["id"]),
+            "league_id": league_id,  # Now int
             "name": league["name"],
             "localized_name": league.get("localizedName", league["name"]),
             "country_code": league.get("ccode", "INT"),
@@ -106,12 +130,17 @@ def _save_leagues_to_mongodb(leagues_data: dict) -> dict:
     # Process country leagues
     for country in leagues_data.get("countries", []):
         for league in country.get("leagues", []):
+            league_id = _safe_int(league.get("id"))
+            if league_id is None:
+                stats["errors"] += 1
+                continue
+            
             page_url = league.get("pageUrl", "")
             if page_url and not page_url.startswith("http"):
                 page_url = f"{FOTMOB_BASE_URL}{page_url}"
             
             leagues_to_insert.append({
-                "league_id": str(league["id"]),
+                "league_id": league_id,  # Now int
                 "name": league["name"],
                 "localized_name": league.get("localizedName", league["name"]),
                 "country_code": league.get("ccode", country.get("ccode", "")),
@@ -124,7 +153,7 @@ def _save_leagues_to_mongodb(leagues_data: dict) -> dict:
     result = mongo.insert_leagues_bulk(leagues_to_insert, validate=True)
     
     stats["success"] = result.get("inserted", 0) + result.get("modified", 0)
-    stats["errors"] = result.get("errors", 0)
+    stats["errors"] += result.get("errors", 0)
     
     logger.info(f"✅ MongoDB: Processed {stats['total']} leagues. "
                 f"Success: {stats['success']}, Errors: {stats['errors']}")
@@ -199,19 +228,20 @@ def get_all_leagues(save_to_json: bool = True, save_to_mongodb: bool = True):
         # Extract popular leagues
         leagues_data["popular"] = [
             {
-                "id": league["id"],
+                "id": _safe_int(league["id"]),  # Keep as int for JSON
                 "name": league["name"],
                 "localizedName": league.get("localizedName", league["name"]),
                 "pageUrl": league.get("pageUrl", ""),
                 "ccode": league.get("ccode", "")
             }
             for league in data.get("popular", [])
+            if _safe_int(league.get("id")) is not None
         ]
         
         # Extract international leagues
         leagues_data["international"] = [
             {
-                "id": league["id"],
+                "id": _safe_int(league["id"]),
                 "name": league["name"],
                 "localizedName": league.get("localizedName", league["name"]),
                 "pageUrl": league.get("pageUrl", ""),
@@ -219,6 +249,7 @@ def get_all_leagues(save_to_json: bool = True, save_to_mongodb: bool = True):
             }
             for category in data.get("international", [])
             for league in category.get("leagues", [])
+            if _safe_int(league.get("id")) is not None
         ]
         
         # Extract country leagues
@@ -228,13 +259,14 @@ def get_all_leagues(save_to_json: bool = True, save_to_mongodb: bool = True):
                 "ccode": country.get("ccode", ""),
                 "leagues": [
                     {
-                        "id": league["id"],
+                        "id": _safe_int(league["id"]),
                         "name": league["name"],
                         "localizedName": league.get("localizedName", league["name"]),
                         "pageUrl": league.get("pageUrl", ""),
                         "ccode": league.get("ccode", country.get("ccode", ""))
                     }
                     for league in country.get("leagues", [])
+                    if _safe_int(league.get("id")) is not None
                 ]
             }
             for country in data.get("countries", [])

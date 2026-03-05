@@ -6,6 +6,10 @@ Core database operations including:
 - Index creation
 - CRUD operations for all collections
 - Batch operations for efficient ingestion
+
+Updated: Integer IDs version
+- All IDs (league_id, match_id, player_id, team_id) are now integers
+- Removed player_match_key field (using compound unique index instead)
 """
 
 import os
@@ -259,7 +263,12 @@ class MongoDBService:
     
     def _create_player_stats_indexes(self):
         """Create indexes for player_stats collection."""
-        self.player_stats.create_index([("player_match_key", ASCENDING)], unique=True)
+        # Compound unique index replaces player_match_key
+        self.player_stats.create_index(
+            [("player_id", ASCENDING), ("match_id", ASCENDING)],
+            unique=True,
+            name="player_match_unique"
+        )
         self.player_stats.create_index([
             ("player_id", ASCENDING),
             ("match_datetime_utc", DESCENDING)
@@ -425,8 +434,7 @@ class MongoDBService:
                 result = validate_match(match_data)
                 if not result.is_valid:
                     return False, f"Validation failed: {result.errors}"
-                # Use original data but ensure match_id is string
-                match_data["match_id"] = str(match_data.get("match_id", ""))
+                match_data = result.data
             
             now = datetime.now(timezone.utc)
             match_data["updated_at"] = now
@@ -459,15 +467,15 @@ class MongoDBService:
                     return False, f"Validation failed: {result.errors}"
                 stat_data = result.data
             
-            # Ensure player_match_key exists
-            if not stat_data.get("player_match_key"):
-                stat_data["player_match_key"] = f"{stat_data['player_id']}_{stat_data['match_id']}"
-            
             now = datetime.now(timezone.utc)
             stat_data["created_at"] = now
             
+            # Use compound key for upsert (player_id + match_id)
             self.player_stats.update_one(
-                {"player_match_key": stat_data["player_match_key"]},
+                {
+                    "player_id": stat_data["player_id"],
+                    "match_id": stat_data["match_id"]
+                },
                 {"$set": stat_data},
                 upsert=True
             )
@@ -499,14 +507,15 @@ class MongoDBService:
                         continue
                     stat = val_result.data
                 
-                if not stat.get("player_match_key"):
-                    stat["player_match_key"] = f"{stat['player_id']}_{stat['match_id']}"
-                
                 stat["created_at"] = now
                 
+                # Use compound key for upsert (player_id + match_id)
                 operations.append(
                     UpdateOne(
-                        {"player_match_key": stat["player_match_key"]},
+                        {
+                            "player_id": stat["player_id"],
+                            "match_id": stat["match_id"]
+                        },
                         {"$set": stat},
                         upsert=True
                     )
@@ -560,9 +569,12 @@ class MongoDBService:
             logger.error(f"Error inserting team: {e}")
             return False, str(e)
     
-    def insert_teams_bulk(self, teams: List[Tuple[str, str]]) -> Dict[str, int]:
+    def insert_teams_bulk(self, teams: List[Tuple[int, str]]) -> Dict[str, int]:
         """
         Bulk insert teams from list of (team_id, team_name) tuples.
+        
+        Args:
+            teams: List of (team_id: int, team_name: str) tuples
         """
         results = {"inserted": 0, "modified": 0, "errors": 0}
         
@@ -573,12 +585,20 @@ class MongoDBService:
             if not team_id:
                 continue
             
+            # Ensure team_id is int
+            if isinstance(team_id, str):
+                try:
+                    team_id = int(team_id)
+                except ValueError:
+                    results["errors"] += 1
+                    continue
+            
             operations.append(
                 UpdateOne(
-                    {"team_id": str(team_id)},
+                    {"team_id": team_id},
                     {
                         "$set": {
-                            "team_id": str(team_id),
+                            "team_id": team_id,
                             "name": team_name or "Unknown Team",
                             "updated_at": now
                         },

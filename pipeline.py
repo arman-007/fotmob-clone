@@ -1,25 +1,82 @@
+#!/usr/bin/env python3
 """
-Football Stats Pipeline
+Football Stats Pipeline (Historical Data Ingestion)
 
-Main orchestration script for fetching and storing football statistics.
+Main orchestration script for fetching and storing historical football statistics.
+Processes leagues, seasons, and matches from FotMob API into MongoDB.
 
 Storage Options:
-- JSON files (for debugging/backup) - can be disabled via flags
-- MongoDB (primary storage) - recommended for production
+    - JSON files (for debugging/backup) - can be disabled via --no-json
+    - MongoDB (primary storage) - recommended for production
 
 Features:
-- Checkpoint/resume: Automatically resumes from where it stopped
-- Failed match retry: Retries only failed matches on subsequent runs
-- Progress tracking: Tracks processing status in MongoDB
+    - Checkpoint/resume: Automatically resumes from where it stopped
+    - Failed match retry: Retries only failed matches on subsequent runs
+    - Progress tracking: Tracks processing status in MongoDB
+    - Flexible league selection: Process popular, international, or country leagues
+    - Skip list: Exclude specific leagues from processing
 
 Usage:
-    python pipeline.py                    # Default: save to both JSON and MongoDB
-    python pipeline.py --no-json          # Skip JSON files (faster)
-    python pipeline.py --no-mongodb       # Skip MongoDB (debugging only)
-    python pipeline.py --build-players    # Build aggregated player profiles after ingestion
-    python pipeline.py --force            # Force re-process even completed seasons
-    python pipeline.py --retry-failed     # Only retry failed matches
-    python pipeline.py --status           # Show pipeline progress status
+    python pipeline.py                              # Default: process ALL leagues
+    python pipeline.py --source popular             # Process popular leagues only
+    python pipeline.py --source countries           # Process all country leagues
+    python pipeline.py --source international       # Process international leagues
+    python pipeline.py --no-json                    # Skip JSON files (faster)
+    python pipeline.py --no-mongodb                 # Skip MongoDB (debugging only)
+    python pipeline.py --build-players              # Build player profiles after ingestion
+    python pipeline.py --force                      # Force re-process even completed seasons
+    python pipeline.py --retry-failed               # Only retry failed matches
+    python pipeline.py --status                     # Show pipeline progress status
+    python pipeline.py --league-limit 5             # Process only first 5 leagues (testing)
+    python pipeline.py --skip-leagues 47,55         # Skip specific league IDs
+
+CLI Flags:
+    --source SOURCE         League source to process:
+                            - 'popular': Top leagues (default)
+                            - 'international': International competitions
+                            - 'countries': All domestic leagues by country
+                            - 'all': All available leagues
+    --no-json               Skip saving JSON files (faster, less disk usage)
+    --no-mongodb            Skip saving to MongoDB (debugging mode)
+    --build-players         Build aggregated player profiles after ingestion
+    --league-limit N        Limit number of leagues to process (for testing)
+    --skip-leagues IDS      Comma-separated league IDs to skip (e.g., "47,55,87")
+    --force                 Force re-process all seasons (ignore completed status)
+    --retry-failed          Only retry previously failed matches
+    --status                Show pipeline progress status and exit
+    -d, --date DATE         Date parameter (default: today, format: YYYYMMDD)
+    -v, --verbose           Enable verbose/debug logging
+
+Examples:
+    # Process ALL leagues (default)
+    python pipeline.py
+
+    # Process only popular leagues
+    python pipeline.py --source popular
+
+    # Process all country leagues, skip JSON for speed
+    python pipeline.py --source countries --no-json
+
+    # Process international tournaments
+    python pipeline.py --source international
+
+    # Test with 2 leagues from all sources
+    python pipeline.py --league-limit 2
+
+    # Resume from where it stopped (automatic)
+    python pipeline.py
+
+    # Force re-process everything
+    python pipeline.py --force
+
+    # Only retry failed matches
+    python pipeline.py --retry-failed
+
+    # Skip problematic leagues
+    python pipeline.py --skip-leagues 10913,285,9173
+
+    # Check progress
+    python pipeline.py --status
 """
 
 import argparse
@@ -30,6 +87,8 @@ import glob
 import sys
 from datetime import datetime
 from datetime import timezone
+from typing import List, Optional, Set
+
 # Service imports
 from service.get_auth_headers import capture_x_mas
 from service.get_leagues import get_all_leagues
@@ -52,19 +111,106 @@ except ImportError:
 # Logging Configuration
 # =============================================================================
 
-# Ensure logs directory exists
-os.makedirs('logs', exist_ok=True)
+def setup_logging(verbose: bool = False):
+    """Configure logging for the pipeline."""
+    os.makedirs('logs', exist_ok=True)
+    
+    level = logging.DEBUG if verbose else logging.INFO
+    
+    logging.basicConfig(
+        level=level,
+        handlers=[
+            logging.FileHandler('logs/pipeline_log.txt', mode='a'),
+            logging.StreamHandler(sys.stdout)
+        ],
+        format='%(asctime)s - %(levelname)s - %(filename)s - %(funcName)s - %(message)s',
+    )
+    
+    return logging.getLogger(__name__)
+
 
 logger = logging.getLogger(__name__)
 
-logging.basicConfig(
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler('logs/pipeline_log.txt', mode='a'),
-        logging.StreamHandler(sys.stdout)  # Also log to console
-    ],
-    format='%(asctime)s - %(levelname)s - %(filename)s - %(funcName)s - %(message)s',
-)
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def safe_int(value, default=None):
+    """Safely convert value to int."""
+    if value is None:
+        return default
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (ValueError, TypeError):
+        return default
+
+
+def extract_league_ids(league_data: dict, source: str) -> List[int]:
+    """
+    Extract league IDs from league data based on source type.
+    
+    Args:
+        league_data: Dictionary containing popular, international, and countries leagues
+        source: One of 'popular', 'international', 'countries', or 'all'
+        
+    Returns:
+        List of league IDs (as integers)
+    """
+    league_ids = []
+    
+    if source in ('popular', 'all'):
+        popular = league_data.get("popular", [])
+        for league in popular:
+            lid = safe_int(league.get("id"))
+            if lid:
+                league_ids.append(lid)
+        logger.info(f"Found {len(popular)} popular leagues")
+    
+    if source in ('international', 'all'):
+        international = league_data.get("international", [])
+        for league in international:
+            lid = safe_int(league.get("id"))
+            if lid:
+                league_ids.append(lid)
+        logger.info(f"Found {len(international)} international leagues")
+    
+    if source in ('countries', 'all'):
+        countries = league_data.get("countries", [])
+        country_count = 0
+        for country in countries:
+            for league in country.get("leagues", []):
+                lid = safe_int(league.get("id"))
+                if lid:
+                    league_ids.append(lid)
+                    country_count += 1
+        logger.info(f"Found {country_count} country leagues from {len(countries)} countries")
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_ids = []
+    for lid in league_ids:
+        if lid not in seen:
+            seen.add(lid)
+            unique_ids.append(lid)
+    
+    return unique_ids
+
+
+def parse_skip_leagues(skip_leagues_str: str) -> Set[int]:
+    """Parse comma-separated league IDs to skip."""
+    if not skip_leagues_str:
+        return set()
+    
+    skip_set = set()
+    for lid in skip_leagues_str.split(","):
+        lid_int = safe_int(lid.strip())
+        if lid_int:
+            skip_set.add(lid_int)
+    
+    return skip_set
 
 
 # =============================================================================
@@ -158,10 +304,10 @@ def build_player_profiles():
                 
             if key not in seasons_summary:
                 seasons_summary[key] = {
-                    "league_id": entry.get("league_id", ""),
+                    "league_id": entry.get("league_id"),
                     "season_id": entry.get("season_id", ""),
                     "league_season_key": key,
-                    "team_id": entry.get("team_id", ""),
+                    "team_id": entry.get("team_id"),
                     "team_name": entry.get("team_name", ""),
                     "matches": 0,
                     "goals": 0,
@@ -292,10 +438,12 @@ def show_pipeline_status():
 # =============================================================================
 
 def run_pipeline(
+    source: str = "all",
     save_to_json: bool = True,
     save_to_mongodb: bool = True,
     build_players: bool = False,
     league_limit: int = None,
+    skip_leagues: Set[int] = None,
     force: bool = False,
     retry_failed_only: bool = False
 ):
@@ -303,14 +451,18 @@ def run_pipeline(
     Run the complete data pipeline with checkpoint/resume support.
     
     Args:
+        source: League source ('popular', 'international', 'countries', 'all')
+                Default is 'all' to process all available leagues.
         save_to_json: Whether to save JSON files (for debugging)
         save_to_mongodb: Whether to save to MongoDB (primary storage)
         build_players: Whether to build player profiles after ingestion
         league_limit: Limit number of leagues to process (for testing)
+        skip_leagues: Set of league IDs to skip
         force: Force re-process even completed seasons
         retry_failed_only: Only retry failed matches, skip successful ones
     """
     start_time = time.time()
+    skip_leagues = skip_leagues or set()
     
     # =========================================================================
     # Step 0: Initialize MongoDB and State Manager (if enabled)
@@ -347,28 +499,24 @@ def run_pipeline(
         logger.error("Failed to fetch league data. Exiting.")
         return
     
-    # # popular or international leagues
-    # popular_leagues = league_data.get("international", [])
-
-    # all leagues
-    popular_leagues = league_data.get("countries", [])
-
-    # this portion is only for country leagues
-    popular_league_ids = [
-        league['id'] 
-        for country in popular_leagues
-        for league in country['leagues']
-    ]
-
-    # # this portion is only for popular and international leagues
-    # popular_league_ids = [str(league.get("id")) for league in popular_leagues]
+    # Extract league IDs based on source
+    league_ids = extract_league_ids(league_data, source)
+    
+    logger.info(f"Total leagues from '{source}' source: {len(league_ids)}")
+    
+    # Apply skip list
+    if skip_leagues:
+        original_count = len(league_ids)
+        league_ids = [lid for lid in league_ids if lid not in skip_leagues]
+        skipped_count = original_count - len(league_ids)
+        logger.info(f"Skipping {skipped_count} leagues from skip list")
     
     # Apply league limit if specified
     if league_limit:
-        popular_league_ids = popular_league_ids[:league_limit]
+        league_ids = league_ids[:league_limit]
         logger.info(f"Limited to {league_limit} leagues for processing")
     
-    logger.info(f"Found {len(popular_league_ids)} popular leagues to process")
+    logger.info(f"Final count: {len(league_ids)} leagues to process")
     
     # =========================================================================
     # Step 2: Process each league
@@ -376,28 +524,13 @@ def run_pipeline(
     total_matches_processed = 0
     total_matches_skipped = 0
     total_matches_failed = 0
-
-    leagues_to_skip = ["10913", 285, 9173, 10175, 516, 112, 8965, 9213, 9305, 9381, 9170, 10007, 10832, 10075, 10053, 118, 113, 9495, 8938, 9471, 38, 119, 278,
-            262, 10443, 263, 9255, 9521, 9658, 40, 149, 41, 264, 266, 144, 9334, 267, 268, 8814, 8971, 9067, 9429, 10077, 10290, 10272, 10274, 10291, 10273,
-            10244, 10078, 9464, 270, 271, 9584, 9096, 272, 9986, 9837, 10872, 273, 9091, 9126, 9407, 120, 9137, 9550, 9491, 9490, 274, 9125, 121, 10223, 252,
-            275, 276, 136, 9100, 330, 521, 122, 10025, 253, 46, 85, 239, 240, 241, 242, 256, 10046,246,11035,519,9941,10270,10314,335,47,48,108,109,117,8944,
-            8947,9084,10176,247,132,133,10626,142,9253,10068,9227,10082,9717,9294,10844,10705,248,10034,9069,9523,250,51,52,251,143,8969,10174,10186,
-            342,10713,53,110,8970,134,11028,9666,9667,9677,207,439,9310,54,146,208,209,512,9081,9734,10022,8924,9676,10840,10650,11034,522,135,145,
-            8816,8815,336,337,212,213,215,216,217,10009,10226,10076,9478,10309,8982,10366,8983,10059,523,9372,9487,10288,524,10310,126,221,218,219,
-            10307,9431,10210,127,128,9735,9097,9862,9098,55,86,141,147,222,11014,10178,10434,11015,#223,8974,9136,9011,10716,224,440,9500,225,9504,529,
-            #226,9486,228,9632,9493,229,9527,9174,249,9528,8985,230,8976,11039,9906,
-    ]
     
-    for league_idx, league_id in enumerate(popular_league_ids, 1):
-        logger.info(f"{'='*30} Processing League {league_idx}/{len(popular_league_ids)}: {league_id} {'='*30}")
-        
-        if league_id in leagues_to_skip:
-            logger.warning(f"Skipping league {league_id}")
-            continue
+    for league_idx, league_id in enumerate(league_ids, 1):
+        logger.info(f"{'='*30} Processing League {league_idx}/{len(league_ids)}: {league_id} {'='*30}")
         
         # Fetch league/season data - pass the X-MAS token
         season_data = get_specific_league_data(
-            league_id,
+            league_id,  # Now int
             x_mas=x_mas_token,
             save_to_json=save_to_json,
             save_to_mongodb=save_to_mongodb
@@ -466,14 +599,14 @@ def run_pipeline(
             
             # Determine which matches to process
             if matches_to_retry:
-                # Only retry failed matches
-                match_ids = [mid for mid in all_match_ids if str(mid) in matches_to_retry]
+                # Only retry failed matches (matches_to_retry contains int IDs)
+                match_ids = [mid for mid in all_match_ids if mid in matches_to_retry]
                 logger.info(f"Processing {len(match_ids)} failed matches (out of {len(all_match_ids)} total)")
             elif retry_failed_only and state_manager:
                 # Skip already processed matches
                 match_ids = [
                     mid for mid in all_match_ids 
-                    if not state_manager.is_match_processed(league_id, season_id, str(mid))
+                    if not state_manager.is_match_processed(league_id, season_id, mid)
                 ]
                 logger.info(f"Processing {len(match_ids)} unprocessed matches (out of {len(all_match_ids)} total)")
             else:
@@ -498,18 +631,18 @@ def run_pipeline(
             season_failed = 0
             
             for match_idx, match_id in enumerate(match_ids, 1):
-                match_id_str = str(match_id)
+                # match_id is already int from get_all_match_ids
                 
                 # Skip if already processed (unless force)
                 if state_manager and not force and not matches_to_retry:
-                    if state_manager.is_match_processed(league_id, season_id, match_id_str):
+                    if state_manager.is_match_processed(league_id, season_id, match_id):
                         total_matches_skipped += 1
                         continue
                 
                 try:
                     result = get_match_wise_player_stats(
                         x_mas=x_mas_token,
-                        match_id=match_id_str,
+                        match_id=match_id,  # Now int
                         season_file_path=season_file_path,
                         save_to_json=save_to_json,
                         save_to_mongodb=save_to_mongodb
@@ -521,7 +654,7 @@ def run_pipeline(
                         
                         # Record success
                         if state_manager:
-                            state_manager.record_match_processed(league_id, season_id, match_id_str)
+                            state_manager.record_match_processed(league_id, season_id, match_id)
                     else:
                         total_matches_failed += 1
                         season_failed += 1
@@ -529,7 +662,7 @@ def run_pipeline(
                         # Record failure
                         if state_manager:
                             state_manager.record_match_failed(
-                                league_id, season_id, match_id_str, 
+                                league_id, season_id, match_id, 
                                 "Empty result from get_match_wise_player_stats"
                             )
                     
@@ -545,7 +678,7 @@ def run_pipeline(
                     
                     # Record failure
                     if state_manager:
-                        state_manager.record_match_failed(league_id, season_id, match_id_str, str(e))
+                        state_manager.record_match_failed(league_id, season_id, match_id, str(e))
                     continue
             
             # Mark season as completed
@@ -570,6 +703,8 @@ def run_pipeline(
     logger.info(f"{'='*50}")
     logger.info(f"PIPELINE COMPLETE")
     logger.info(f"{'='*50}")
+    logger.info(f"Source: {source}")
+    logger.info(f"Total leagues processed: {len(league_ids)}")
     logger.info(f"Total matches processed: {total_matches_processed}")
     logger.info(f"Total matches skipped (already done): {total_matches_skipped}")
     logger.info(f"Total matches failed: {total_matches_failed}")
@@ -591,20 +726,34 @@ def run_pipeline(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Football Stats Pipeline - Fetch and store football statistics",
+        description="Football Stats Pipeline - Fetch and store historical football statistics",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python pipeline.py                     # Default: resume from where it stopped
-    python pipeline.py --no-json           # Skip JSON files (faster, production mode)
-    python pipeline.py --status            # Show pipeline progress status
-    python pipeline.py --force             # Force re-process all (ignore checkpoints)
-    python pipeline.py --retry-failed      # Only retry previously failed matches
-    python pipeline.py --league-limit 2    # Process only first 2 leagues (testing)
-    python pipeline.py --build-players     # Build player profiles after ingestion
+    python pipeline.py                              # Default: process ALL leagues
+    python pipeline.py --source popular             # Process only popular leagues
+    python pipeline.py --source countries           # Process all country leagues
+    python pipeline.py --source international       # Process international leagues
+    python pipeline.py --no-json                    # Skip JSON files (faster)
+    python pipeline.py --status                     # Show pipeline progress status
+    python pipeline.py --force                      # Force re-process all
+    python pipeline.py --retry-failed               # Only retry failed matches
+    python pipeline.py --league-limit 2             # Test with 2 leagues
+    python pipeline.py --skip-leagues 47,55,87      # Skip specific leagues
+    python pipeline.py --build-players              # Build player profiles after
         """
     )
     
+    # Source selection
+    parser.add_argument(
+        "--source",
+        type=str,
+        choices=["popular", "international", "countries", "all"],
+        default="all",
+        help="League source to process (default: all)"
+    )
+    
+    # Output options
     parser.add_argument(
         "--no-json",
         action="store_true",
@@ -623,6 +772,7 @@ Examples:
         help="Build aggregated player profiles after ingestion"
     )
     
+    # League filtering
     parser.add_argument(
         "--league-limit",
         type=int,
@@ -630,6 +780,14 @@ Examples:
         help="Limit number of leagues to process (for testing)"
     )
     
+    parser.add_argument(
+        "--skip-leagues",
+        type=str,
+        default=None,
+        help="Comma-separated league IDs to skip (e.g., '47,55,87')"
+    )
+    
+    # Processing modes
     parser.add_argument(
         "--force",
         action="store_true",
@@ -655,7 +813,16 @@ Examples:
         help="Date parameter (default: today)"
     )
     
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable verbose/debug logging"
+    )
+    
     args = parser.parse_args()
+    
+    # Setup logging
+    setup_logging(args.verbose)
     
     # If --status flag, just show status and exit
     if args.status:
@@ -669,23 +836,30 @@ Examples:
         print_database_stats()
         sys.exit(0)
     
+    # Parse skip leagues
+    skip_leagues = parse_skip_leagues(args.skip_leagues)
+    
     logger.info("=" * 60)
     logger.info("FOOTBALL STATS PIPELINE STARTED")
     logger.info("=" * 60)
     logger.info(f"Configuration:")
+    logger.info(f"  - Source: {args.source}")
     logger.info(f"  - Save to JSON: {not args.no_json}")
     logger.info(f"  - Save to MongoDB: {not args.no_mongodb}")
     logger.info(f"  - Build player profiles: {args.build_players}")
     logger.info(f"  - League limit: {args.league_limit or 'None (all leagues)'}")
+    logger.info(f"  - Skip leagues: {skip_leagues if skip_leagues else 'None'}")
     logger.info(f"  - Force re-process: {args.force}")
     logger.info(f"  - Retry failed only: {args.retry_failed}")
     logger.info("=" * 60)
     
     run_pipeline(
+        source=args.source,
         save_to_json=not args.no_json,
         save_to_mongodb=not args.no_mongodb,
         build_players=args.build_players,
         league_limit=args.league_limit,
+        skip_leagues=skip_leagues,
         force=args.force,
         retry_failed_only=args.retry_failed
     )

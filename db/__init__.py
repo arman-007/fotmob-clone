@@ -6,6 +6,10 @@ This module provides MongoDB integration with:
 - Core database operations (mongodb_service.py)
 - Query helpers for Fantasy PL style queries (query_helpers.py)
 - Pipeline state management for checkpoint/resume (pipeline_state.py)
+
+Updated: Integer IDs version
+- All IDs (league_id, match_id, player_id, team_id) are now integers
+- Removed player_match_key (using compound unique index instead)
 """
 
 from db.mongodb_service import (
