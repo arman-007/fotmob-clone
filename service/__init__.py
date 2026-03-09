@@ -12,7 +12,8 @@ Modules:
 - match_stats_processor: Shared processing logic for match stats
 """
 
-from service.get_auth_headers import capture_x_mas
+from service.get_auth_headers import capture_auth_info
+from service.auth_utils import get_auth_headers, set_auth_info
 from service.get_leagues import get_all_leagues
 from service.get_specific_league import get_specific_league_data
 from service.get_player_stats import get_match_wise_player_stats
@@ -35,7 +36,9 @@ from service.match_stats_processor import (
 
 __all__ = [
     # Authentication
-    "capture_x_mas",
+    "capture_auth_info",
+    "get_auth_headers",
+    "set_auth_info",
     
     # Historical pipeline
     "get_all_leagues",

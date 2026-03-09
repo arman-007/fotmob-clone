@@ -89,10 +89,8 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Optional, Set
 
-# Add project root to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from service.get_auth_headers import capture_x_mas
+from service.get_auth_headers import capture_auth_info
+from service.auth_utils import set_auth_info
 from service.get_daily_matches import fetch_matches_by_date, get_match_ids_from_json
 from service.match_stats_processor import (
     fetch_match_details,
@@ -258,19 +256,17 @@ def show_daily_status(date: str, league_ids: List[int] = None) -> None:
     
     print(f"\n{'='*60}")
     print(f"DAILY MATCH STATUS FOR {date}")
-    print(f"Date: {date_display}")
-    print(f"{'='*60}")
-    
-    # Capture X-MAS token first
-    x_mas = capture_x_mas()
-    if not x_mas:
-        print("❌ Failed to capture X-MAS token")
+    # Capture auth info (x-mas + cookies)
+    auth_info = capture_auth_info()
+    if not auth_info:
+        print("❌ Failed to capture auth information")
         return
+    
+    set_auth_info(auth_info)
     
     # Fetch matches
     result = fetch_matches_by_date(
         date=date,
-        x_mas=x_mas,
         league_ids=league_ids,
         save_to_json=True
     )
@@ -397,22 +393,17 @@ def run_daily_pipeline(
     # =========================================================================
     # Step 1: Initialize MongoDB (if enabled)
     # =========================================================================
-    if save_to_mongodb and not dry_run:
-        if not initialize_mongodb():
-            logger.error("MongoDB initialization failed, continuing with JSON only")
-            save_to_mongodb = False
-    
     # =========================================================================
-    # Step 2: Capture X-MAS token
+    # Step 2: Capture Auth Information
     # =========================================================================
-    logger.info("Capturing X-MAS token...")
-    x_mas = capture_x_mas()
+    logger.info("Capturing auth information (cookies + x-mas)...")
+    auth_info = capture_auth_info()
     
-    if not x_mas:
-        logger.error("❌ Failed to capture X-MAS token. Exiting.")
+    if not auth_info:
+        logger.error("❌ Failed to capture auth info. Exiting.")
         return stats
     
-    logger.info(f"✅ X-MAS token captured: {x_mas[:30]}...")
+    set_auth_info(auth_info)
     
     # =========================================================================
     # Step 3: Fetch matches for the date
@@ -421,7 +412,6 @@ def run_daily_pipeline(
     
     result = fetch_matches_by_date(
         date=date,
-        x_mas=x_mas,
         league_ids=league_ids,
         save_to_json=save_to_json,
         output_dir=output_dir
@@ -505,25 +495,19 @@ def run_daily_pipeline(
         match_id = match["match_id"]  # Already int
         league_id = safe_int(match.get("league_id"))  # Convert to int
         
-        logger.info(f"[{idx}/{len(matches_to_process)}] Processing match {match_id} ({match.get('league_name', 'Unknown')})")
-        
-        iteration_count += 1
-        
-        # Refresh token every 35-40 matches
-        if iteration_count >= token_refresh_threshold:
-            logger.info("Refreshing X-MAS token...")
-            x_mas = capture_x_mas()
-            if not x_mas:
-                logger.error("❌ Failed to refresh X-MAS token")
-                stats["failed"] += 1
-                continue
-            logger.info(f"✅ Token refreshed: {x_mas[:30]}...")
-            iteration_count = 0
-            token_refresh_threshold = random.randint(35, 40)
-        
+        # Refresh session every 40-50 matches to keep cookies fresh
+        if idx > 0 and idx % 45 == 0:
+            logger.info("Refreshing session auth info...")
+            auth_info = capture_auth_info()
+            if auth_info:
+                set_auth_info(auth_info)
+                logger.info("✅ Session refreshed")
+            else:
+                logger.warning("⚠️ Failed to refresh session, continuing with old auth info")
+
         # Fetch match details
         try:
-            response_data = fetch_match_details(x_mas, match_id)
+            response_data = fetch_match_details(match_id)
             
             if not response_data:
                 logger.warning(f"No data returned for match {match_id}")

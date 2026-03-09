@@ -74,57 +74,65 @@ logger = logging.getLogger(__name__)
 URL = os.environ.get("URL")
 
 
+from service.auth_utils import get_auth_headers, generate_x_mas_header
+from service.playwright_auth import fetch_json_playwright
+
 # =============================================================================
 # API Request Functions
 # =============================================================================
 
-def fetch_match_details(x_mas: str, match_id: Union[int, str]) -> Optional[dict]:
+import re
+
+def fetch_match_details(match_id: Union[int, str]) -> Optional[dict]:
     """
-    Fetch match details from FotMob API.
-    
-    Args:
-        x_mas: X-MAS authentication token
-        match_id: Match ID to fetch (int or str)
-        
-    Returns:
-        Raw API response dict or None on failure
+    Fetch match details by extracting the Next.js state from the match page HTML.
+    This completely bypasses the /api/data/matchDetails Cloudflare protection.
+    Falls back to Playwright if the HTML extraction fails.
     """
-    if not URL:
-        logger.error("URL environment variable is not set")
-        return None
-    
-    if not x_mas:
-        logger.error(f"❌ X-MAS token is None/empty for match {match_id}")
-        return None
-    
-    url = f"{URL}/matchDetails"
-    params = {'matchId': match_id}  # API accepts both int and str
-    
+    url = f"https://www.fotmob.com/match/{match_id}"
     headers = {
-        'accept': '*/*',
-        'accept-language': 'en-US,en;q=0.9',
-        'cache-control': 'no-cache',
-        'pragma': 'no-cache',
-        'priority': 'u=1, i',
-        'referer': 'https://www.fotmob.com/',
-        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'x-mas': x_mas,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
     }
     
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=15)
+        logger.info(f"Extracting Next.js data from HTML: {url}")
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
-        return response.json()
         
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"❌ HTTP Error for match {match_id}: {e}")
+        match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', response.text)
+        if match:
+            data = json.loads(match.group(1))
+            if 'props' in data and 'pageProps' in data['props']:
+                # The pageProps contains the exact same structure as the API response!
+                page_props = data['props']['pageProps']
+                if 'general' in page_props:
+                    logger.info(f"✅ Successfully extracted NEXT_DATA for match {match_id}")
+                    return page_props
+        
+        logger.warning(f"__NEXT_DATA__ not found or missing 'general' key for match {match_id}. HTML size: {len(response.text)}")
+    except Exception as e:
+        logger.warning(f"HTML extraction failed for match {match_id}: {e}")
+        
+    logger.info("Falling back to Playwright API fetch...")
+    if not URL:
+        logger.error("URL environment variable is not set")
         return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Network Error for match {match_id}: {e}")
-        return None
-    except json.JSONDecodeError:
-        logger.error(f"❌ JSON Decode Error for match {match_id}")
-        return None
+        
+    api_path = f"/api/data/matchDetails?matchId={match_id}"
+    api_url = f"https://www.fotmob.com{api_path}"
+    
+    try:
+        headers_pw = {"x-mas": generate_x_mas_header(api_path)}
+        data = fetch_json_playwright(api_url, headers=headers_pw)
+        if data:
+            return data
+            
+    except Exception as e:
+        logger.error(f"❌ Error fetching match details for {match_id} via Playwright: {e}")
+        
+    return None
 
 
 # =============================================================================

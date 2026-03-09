@@ -24,7 +24,7 @@ import os
 from typing import Optional, List, Dict, Any, Union
 import requests
 
-from service.get_auth_headers import capture_x_mas
+from service.auth_utils import get_auth_headers
 
 # MongoDB imports - wrapped in try/except for when running without MongoDB
 try:
@@ -165,7 +165,6 @@ def _save_season_to_mongodb(
 
 def get_specific_league_data(
     league_id: Union[int, str],
-    x_mas: str = None,
     save_to_json: bool = True,
     save_to_mongodb: bool = True
 ) -> Optional[Dict[str, Any]]:
@@ -177,7 +176,6 @@ def get_specific_league_data(
     
     Args:
         league_id: League ID to fetch (int or str)
-        x_mas: Optional X-MAS token (will be captured if not provided)
         save_to_json: Whether to save to JSON files (default: True for debugging)
         save_to_mongodb: Whether to save to MongoDB (default: True)
         
@@ -196,29 +194,13 @@ def get_specific_league_data(
     
     url = f"{URL}/leagues"
     
-    # Get fresh X-MAS token if not provided
-    if not x_mas:
-        logger.info(f"Capturing fresh X-MAS token for league {league_id}...")
-        x_mas = capture_x_mas()
-        
-    if not x_mas:
-        logger.error(f"Failed to capture X-MAS token for league {league_id}")
-        return None
-    
     params = {
         'id': league_id,
     }
 
-    headers = {
-        'accept': '*/*',
-        'accept-language': 'en-US,en;q=0.9',
-        'cache-control': 'no-cache',
-        'pragma': 'no-cache',
-        'priority': 'u=1, i',
-        'referer': 'https://www.fotmob.com/',
-        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'x-mas': x_mas,
-    }
+    # Generate all required headers (dynamic x-mas + cookies)
+    api_path = f"/api/data/leagues?id={league_id}"
+    headers = get_auth_headers(api_path)
 
     # Result structure - will be returned for in-memory use
     result = {

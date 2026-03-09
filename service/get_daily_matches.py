@@ -21,7 +21,8 @@ from typing import Optional, List, Dict, Any, Union
 import requests
 from dotenv import load_dotenv
 
-from service.get_auth_headers import capture_x_mas
+from service.auth_utils import get_auth_headers, generate_x_mas_header
+from service.playwright_auth import fetch_json_playwright
 from utils.get_timezone import get_local_time_zone
 
 load_dotenv()
@@ -45,7 +46,6 @@ def safe_int(value, default=None):
 
 def fetch_matches_by_date(
     date: str,
-    x_mas: str = None,
     league_ids: List[int] = None,
     save_to_json: bool = True,
     output_dir: str = "output/daily"
@@ -55,7 +55,6 @@ def fetch_matches_by_date(
     
     Args:
         date: Date string in format YYYYMMDD (e.g., "20241215")
-        x_mas: Optional X-MAS token (will be captured if not provided)
         league_ids: Optional list of league IDs to filter (as integers, None = all leagues)
         save_to_json: Whether to save raw response to JSON file
         output_dir: Directory for JSON output
@@ -73,17 +72,12 @@ def fetch_matches_by_date(
         logger.error("URL environment variable is not set")
         return None
     
-    # Get X-MAS token if not provided
-    if not x_mas:
-        logger.info("Capturing X-MAS token...")
-        x_mas = capture_x_mas()
-        
-    if not x_mas:
-        logger.error("Failed to capture X-MAS token")
-        return None
-    
     # Get timezone
     timezone = get_local_time_zone()
+    
+    # Generate all required headers (dynamic x-mas + cookies)
+    api_path = f"/api/data/matches?date={date}&timezone={timezone}"
+    headers = get_auth_headers(api_path)
     
     url = f"{URL}/matches"
     params = {
@@ -91,23 +85,22 @@ def fetch_matches_by_date(
         'timezone': str(timezone),
     }
     
-    headers = {
-        'accept': '*/*',
-        'accept-language': 'en-US,en;q=0.9',
-        'cache-control': 'no-cache',
-        'pragma': 'no-cache',
-        'priority': 'u=1, i',
-        'referer': 'https://www.fotmob.com/',
-        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'x-mas': x_mas,
-    }
-    
     try:
         logger.info(f"Fetching matches for date: {date}")
         response = requests.get(url, params=params, headers=headers, timeout=15)
-        response.raise_for_status()
         
-        data = response.json()
+        if response.status_code == 403:
+            logger.warning(f"403 Forbidden for date {date}, falling back to Playwright...")
+            fallback_path = f"/api/data/matches?date={date}&timezone={timezone}"
+            api_url = f"https://www.fotmob.com{fallback_path}"
+            # Pass x-mas header for the in-page fetch
+            fallback_headers = {"x-mas": generate_x_mas_header(fallback_path)}
+            data = fetch_json_playwright(api_url, headers=fallback_headers)
+            if not data:
+                return None
+        else:
+            response.raise_for_status()
+            data = response.json()
         
         if not data:
             logger.warning(f"Empty response for date {date}")
@@ -126,14 +119,8 @@ def fetch_matches_by_date(
         
         return result
         
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"❌ HTTP Error fetching matches for {date}: {e}")
-        return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Request Error fetching matches for {date}: {e}")
-        return None
-    except json.JSONDecodeError as e:
-        logger.error(f"❌ JSON Decode Error for {date}: {e}")
+    except Exception as e:
+        logger.error(f"❌ Error fetching matches for {date}: {e}")
         return None
 
 

@@ -24,7 +24,7 @@ import os
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 
-from service.get_auth_headers import capture_x_mas
+from service.auth_utils import get_auth_headers
 
 # MongoDB imports - wrapped in try/except for when running without MongoDB
 try:
@@ -189,21 +189,11 @@ def get_all_leagues(
         logger.error("URL environment variable is not set.")
         return None
     
-    # Get fresh X-MAS token
-    x_mas = capture_x_mas()
-    
-    if not x_mas:
-        logger.error("Failed to capture X-MAS token")
-        return None
+    # Generate all required headers (dynamic x-mas + cookies)
+    api_path = "/api/data/allLeagues?locale=en&country=BGD"
+    headers = get_auth_headers(api_path)
     
     url = f"{URL}/allLeagues?locale=en&country=BGD"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-        'Accept': '*/*',
-        'accept-language': 'en-US,en;q=0.9',
-        'accept-encoding': 'gzip, deflate, br, zstd',
-        'x-mas': x_mas
-    }
     
     try:
         logger.info("Fetching leagues data from FotMob API")
