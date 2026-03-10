@@ -1,34 +1,36 @@
 """
 Get Player Stats Module
 
-Fetches match-wise player statistics from FotMob API and stores in:
-1. JSON files (for debugging/backup)
-2. MongoDB - matches collection (with embedded player_stats)
-3. MongoDB - player_stats collection (flattened for player queries)
+Fetches match-wise player statistics from FotMob API.
 
-Updated: Integer IDs version
-- All IDs (match_id, player_id, team_id, league_id) are now integers
-- Removed player_match_key (using compound unique index instead)
+Storage:
+- MongoDB (primary storage) - matches and player_stats collections
+- JSON files (optional) - for debugging/backup only
 
-The JSON saving is kept for debugging purposes but can be commented out.
+Data Flow:
+- Receive league_id and season_id directly (no file path dependency)
+- Fetch from API → Process in memory
+- Save to MongoDB (primary)
+- Save to JSON (optional)
+
+This module works with in-memory data flow, eliminating the need
+to read from JSON files. The --no-json flag truly means no JSON.
 """
 
 import json
 import logging
 import os
 import requests
-from datetime import datetime
-from typing import Optional, List, Dict, Any, Tuple
+from datetime import datetime, timezone
+from typing import Optional, List, Dict, Any, Tuple, Union
 from dotenv import load_dotenv
 
-from service.get_auth_headers import capture_x_mas
 from get_additional_stats import process_additional_stats
 
 # MongoDB imports - wrapped in try/except for when running without MongoDB
 try:
     from db import (
         get_mongodb_service,
-        extract_season_from_path,
         parse_datetime,
         safe_int,
         safe_float
@@ -36,12 +38,6 @@ try:
     MONGODB_AVAILABLE = True
 except ImportError:
     MONGODB_AVAILABLE = False
-    # Provide fallback functions when MongoDB is not available
-    import re
-    
-    def extract_season_from_path(path):
-        match = re.search(r'(\d{4}-\d{2,4})', path)
-        return match.group(1) if match else None
     
     def parse_datetime(dt_string):
         if not dt_string:
@@ -53,11 +49,13 @@ except ImportError:
                 continue
         return None
     
-    def safe_int(value, default=0):
+    def safe_int(value, default=None):
         if value is None:
             return default
+        if isinstance(value, int):
+            return value
         try:
-            return int(value)
+            return int(str(value).strip())
         except (ValueError, TypeError):
             return default
     
@@ -77,35 +75,42 @@ URL = os.environ.get("URL")
 
 
 # =============================================================================
-# JSON File Operations (kept for debugging)
+# JSON File Operations (optional, for debugging)
 # =============================================================================
 
-def save_data_to_json(season_file_path: str, data: dict, match_id: int) -> None:
+def _save_to_json(
+    data: dict,
+    match_id: int,
+    league_id: int,
+    season_id: str,
+    output_base: str = "output/leagues"
+) -> None:
     """
     Save player stats to JSON file.
     
-    This function is kept for debugging purposes.
-    Comment out the call in get_match_wise_player_stats() to skip JSON saving.
+    Args:
+        data: Processed match data
+        match_id: Match ID
+        league_id: League ID
+        season_id: Season ID
+        output_base: Base output directory
     """
-    output_dir = f"{os.path.dirname(season_file_path)}/player_stats/"
+    output_dir = f"{output_base}/{league_id}/{season_id}/player_stats"
     filename = f"player_stats_matchID_{match_id}.json"
     
     try:
         os.makedirs(output_dir, exist_ok=True)
-    except OSError as e:
-        logger.error(f"❌ Failed to create directory '{output_dir}': {e}")
-        return
-
-    filepath = os.path.join(output_dir, filename)
-
-    try:
+        filepath = os.path.join(output_dir, filename)
+        
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, default=str)
+        
         logger.debug(f"✅ JSON saved to: {filepath}")
+        
     except IOError as e:
-        logger.error(f"❌ Failed to write to '{filepath}': {e}")
+        logger.error(f"❌ Failed to write to JSON: {e}")
     except TypeError as e:
-        logger.error(f"❌ Serialization error for '{filename}': {e}")
+        logger.error(f"❌ Serialization error: {e}")
 
 
 # =============================================================================
@@ -114,14 +119,18 @@ def save_data_to_json(season_file_path: str, data: dict, match_id: int) -> None:
 
 def _save_match_to_mongodb(
     match_data: dict,
-    season_file_path: str
+    league_id: int,
+    season_id: str
 ) -> Tuple[bool, Dict[str, int]]:
     """
     Save match data to MongoDB (both matches and player_stats collections).
     
+    All IDs are stored as integers.
+    
     Args:
         match_data: Processed match data dictionary
-        season_file_path: Path to season file (used to extract league/season info)
+        league_id: League ID (int)
+        season_id: Season ID (str, e.g., "2024-2025")
         
     Returns:
         Tuple of (success, stats_dict)
@@ -138,19 +147,14 @@ def _save_match_to_mongodb(
         logger.warning("Empty or invalid match data, skipping MongoDB save")
         return False, stats
     
-    # Extract league/season from path
-    season_id = extract_season_from_path(season_file_path)
-    league_id = safe_int(match_data.get("league_id"))  # Convert to int
+    # All IDs as integers
+    match_id = safe_int(match_data["match_id"])
+    league_id = safe_int(league_id) or safe_int(match_data.get("league_id"))
     league_season_key = f"{league_id}_{season_id}" if league_id and season_id else ""
-    
-    match_id = safe_int(match_data["match_id"])  # Convert to int
-    if not match_id:
-        logger.warning(f"Invalid match_id: {match_data.get('match_id')}")
-        return False, stats
     
     match_datetime = parse_datetime(match_data.get("match_date_time_UTC"))
     
-    # Extract team info - convert to int
+    # Extract team info as integers
     home_team_id = safe_int(match_data.get("home_team_id"))
     away_team_id = safe_int(match_data.get("away_team_id"))
     home_team_name = match_data.get("home_team_name", "")
@@ -173,22 +177,22 @@ def _save_match_to_mongodb(
     match_red_cards = 0
     
     for ps in raw_player_stats:
-        player_id = safe_int(ps.get("player_fotmob_id"))  # Convert to int
+        player_id = safe_int(ps.get("player_fotmob_id"))
         if not player_id:
             continue
         
-        player_team_id = safe_int(ps.get("player_team_id"))  # Convert to int
-        is_home = player_team_id == home_team_id if player_team_id and home_team_id else False
+        player_team_id = safe_int(ps.get("player_team_id"))
+        is_home = player_team_id == home_team_id
         opponent_team_id = away_team_id if is_home else home_team_id
         opponent_team_name = away_team_name if is_home else home_team_name
         
         # Extract stats safely
-        goals = safe_int(ps.get("goals", 0))
-        assists = safe_int(ps.get("assists", 0))
+        goals = safe_int(ps.get("goals"), 0)
+        assists = safe_int(ps.get("assists"), 0)
         yellow_card = bool(ps.get("yellow_card", False))
         red_card = bool(ps.get("red_card", False))
         rating = safe_float(ps.get("rating"))
-        minutes_played = safe_int(ps.get("minutes_played", 0))
+        minutes_played = safe_int(ps.get("minutes_played"), 0)
         
         # Aggregate match stats
         match_goals += goals
@@ -197,9 +201,9 @@ def _save_match_to_mongodb(
         
         # Build embedded player stat (for matches collection)
         embedded_stat = {
-            "player_id": player_id,  # Now int
+            "player_id": player_id,  # int
             "name": ps.get("name", ""),
-            "team_id": player_team_id,  # Now int
+            "team_id": player_team_id,  # int
             "team_name": ps.get("player_team_name", ""),
             "is_goalkeeper": ps.get("isGoalkeeper", False),
             "goals": goals,
@@ -224,19 +228,19 @@ def _save_match_to_mongodb(
         embedded_player_stats.append(embedded_stat)
         
         # Build flattened player stat (for player_stats collection)
-        # NOTE: player_match_key is removed - using compound unique index instead
         flattened_stat = {
-            "player_id": player_id,  # Now int
+            "player_match_key": f"{player_id}_{match_id}",
+            "player_id": player_id,  # int
             "name": ps.get("name", ""),
-            "team_id": player_team_id,  # Now int
+            "team_id": player_team_id,  # int
             "team_name": ps.get("player_team_name", ""),
             "is_goalkeeper": ps.get("isGoalkeeper", False),
-            "match_id": match_id,  # Now int
+            "match_id": match_id,  # int
             "match_datetime_utc": match_datetime,
-            "league_id": league_id,  # Now int
+            "league_id": league_id,  # int
             "season_id": season_id,
             "league_season_key": league_season_key,
-            "opponent_team_id": opponent_team_id,  # Now int
+            "opponent_team_id": opponent_team_id,  # int
             "opponent_team_name": opponent_team_name,
             "is_home": is_home,
             "goals": goals,
@@ -256,8 +260,8 @@ def _save_match_to_mongodb(
     
     # Build match document
     match_doc = {
-        "match_id": match_id,  # Now int
-        "league_id": league_id,  # Now int
+        "match_id": match_id,  # int
+        "league_id": league_id,  # int
         "season_id": season_id,
         "league_season_key": league_season_key,
         "match_name": match_data.get("match_name", ""),
@@ -265,11 +269,11 @@ def _save_match_to_mongodb(
         "started": match_data.get("started", False),
         "finished": match_data.get("finished", False),
         "home_team": {
-            "team_id": home_team_id,  # Now int
+            "team_id": home_team_id,  # int
             "name": home_team_name
         },
         "away_team": {
-            "team_id": away_team_id,  # Now int
+            "team_id": away_team_id,  # int
             "name": away_team_name
         },
         "player_stats": embedded_player_stats,
@@ -283,7 +287,6 @@ def _save_match_to_mongodb(
     # =========================================================================
     # Insert to MongoDB
     # =========================================================================
-    
     try:
         # Insert match
         success, error = mongo.insert_match(match_doc, validate=True)
@@ -316,36 +319,7 @@ def _save_match_to_mongodb(
 # API Request Functions
 # =============================================================================
 
-def _fetch_match_ids(date: str) -> Optional[List[int]]:
-    """Fetch match IDs from a stored JSON file by date."""
-    filepath = f"output/get_matches_{date}.json"
-    
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            logger.debug(f"📂 Successfully loaded data from {filepath}")
-        
-        match_ids = []
-        if data and data.get("leagues"):
-            for league in data.get("leagues"):
-                for match in league.get("matches", []):
-                    match_id = safe_int(match.get("id"))
-                    if match_id:
-                        match_ids.append(match_id)
-            return match_ids
-        else:
-            logger.warning("No response or no 'leagues' data found.")
-            return None
-            
-    except FileNotFoundError:
-        logger.error(f"⚠️ File not found: {filepath}")
-        return None
-    except json.JSONDecodeError:
-        logger.error(f"⚠️ Invalid JSON in: {filepath}")
-        return None
-
-
-def _make_request(x_mas: str, match_id: int) -> Optional[dict]:
+def _make_request(x_mas: str, match_id: Union[int, str]) -> Optional[dict]:
     """Make API request to fetch match details."""
     url = f"{URL}/matchDetails"
     
@@ -360,12 +334,6 @@ def _make_request(x_mas: str, match_id: int) -> Optional[dict]:
         'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         'x-mas': x_mas,
     }
-    
-    # Debug: log the x-mas token being used
-    if x_mas:
-        logger.debug(f"Using X-MAS token: {x_mas[:30]}...")
-    else:
-        logger.error(f"❌ X-MAS token is None or empty for match {match_id}!")
     
     try:
         response = requests.get(url, params=params, headers=headers, timeout=15)
@@ -393,16 +361,16 @@ def _process_general_section(general_data: dict) -> dict:
     away_team = general_data.get("awayTeam", {})
     
     return {
-        "match_id": safe_int(general_data.get("matchId")),  # Convert to int
+        "match_id": safe_int(general_data.get("matchId")),
         "match_name": general_data.get("matchName"),
-        "league_id": safe_int(general_data.get("parentLeagueId")),  # Convert to int
+        "league_id": safe_int(general_data.get("parentLeagueId")),
         "league_name": general_data.get("leagueName"),
         "match_date_time_UTC": general_data.get("matchTimeUTCDate"),
         "started": general_data.get("started"),
         "finished": general_data.get("finished"),
-        "home_team_id": safe_int(home_team.get("id")),  # Convert to int
+        "home_team_id": safe_int(home_team.get("id")),
         "home_team_name": home_team.get("name"),
-        "away_team_id": safe_int(away_team.get("id")),  # Convert to int
+        "away_team_id": safe_int(away_team.get("id")),
         "away_team_name": away_team.get("name"),
     }
 
@@ -446,8 +414,8 @@ def _process_individual_player_stats(player_stats: dict) -> dict:
     """Process individual player statistics."""
     stats = {
         "name": player_stats.get("name"),
-        "player_fotmob_id": safe_int(player_stats.get("id")),  # Convert to int
-        "player_team_id": safe_int(player_stats.get("teamId")),  # Convert to int
+        "player_fotmob_id": safe_int(player_stats.get("id")),
+        "player_team_id": safe_int(player_stats.get("teamId")),
         "player_team_name": player_stats.get("teamName"),
         "isGoalkeeper": player_stats.get("isGoalkeeper"),
     }
@@ -462,7 +430,7 @@ def _process_individual_player_stats(player_stats: dict) -> dict:
 def _process_content_section(content_data: dict) -> List[dict]:
     """Process content section to extract player stats."""
     if not content_data:
-        logger.warning("_process_content_section received empty content_data.")
+        logger.debug("_process_content_section received empty content_data.")
         return []
     
     if content_data.get("playerStats") is None:
@@ -481,7 +449,7 @@ def _process_content_section(content_data: dict) -> List[dict]:
     # Get additional stats (yellow cards, goals, etc.)
     additional_stats = process_additional_stats(content_data.get("matchFacts", {}))
     # Convert keys to int for matching
-    additional_stats = {safe_int(k): v for k, v in additional_stats.items() if safe_int(k)}
+    additional_stats = {safe_int(k): v for k, v in additional_stats.items()}
 
     # Merge additional stats into player stats
     for player in player_stats:
@@ -514,64 +482,105 @@ def _process_match_info(response_data: Optional[dict]) -> dict:
 # =============================================================================
 
 def get_match_wise_player_stats(
-    x_mas: str,
-    match_id: int,  # Now expects int
-    season_file_path: str,
+    match_id: Union[int, str],
+    league_id: Union[int, str] = None,
+    season_id: str = None,
     save_to_json: bool = True,
-    save_to_mongodb: bool = True
+    save_to_mongodb: bool = True,
+    no_browser: bool = False,
+    x_mas: str = None
 ) -> dict:
     """
     Fetch and store player stats for a specific match.
-    
+
+    Uses the 3-tier fallback strategy from match_stats_processor:
+      1. HTML __NEXT_DATA__ extraction (pure HTTP)
+      2. API call with dynamic x-mas headers (pure HTTP)
+      3. Playwright browser fetch (optional)
+
     Args:
-        x_mas: X-MAS authentication token
-        match_id: Match ID to fetch (int)
-        season_file_path: Path to season file (for context)
+        match_id: Match ID to fetch (int or str)
+        league_id: League ID (int or str) - passed directly, no file path needed
+        season_id: Season ID (str, e.g., "2024-2025") - passed directly
         save_to_json: Whether to save to JSON (default: True for debugging)
         save_to_mongodb: Whether to save to MongoDB (default: True)
-        
+        no_browser: If True, skip browser-based fallback
+        x_mas: Deprecated, kept for backward compatibility (ignored)
+
     Returns:
         Processed match stats dictionary
     """
-    # Ensure match_id is int
     match_id = safe_int(match_id)
+    league_id = safe_int(league_id)
+
     if not match_id:
-        logger.error(f"❌ Invalid match_id: {match_id}")
+        logger.error(f"Invalid match_id!")
         return {}
-    
-    # Debug: Check if x_mas is being passed
-    if not x_mas:
-        logger.error(f"❌ X-MAS token is None/empty for match {match_id}!")
-        print(f"❌ X-MAS token is None/empty for match {match_id}!")
-        return {}
-    
-    # Fetch data from API
-    response_data = _make_request(x_mas, match_id)
+
+    # Use the 3-tier fetch from match_stats_processor
+    from service.match_stats_processor import fetch_match_details
+    response_data = fetch_match_details(match_id, no_browser=no_browser)
     final_stats = _process_match_info(response_data)
     
     if not final_stats:
         logger.warning(f"No stats processed for match {match_id}")
         return {}
     
+    # Use league_id from response if not provided
+    if not league_id:
+        league_id = safe_int(final_stats.get("league_id"))
+    
+    # Determine season from match date if not provided
+    if not season_id:
+        season_id = _determine_season_from_date(final_stats.get("match_date_time_UTC"))
+    
     # =========================================================================
-    # Save to JSON (comment out to skip - reduces overhead)
+    # Save to JSON (optional)
     # =========================================================================
-    if save_to_json:
-        save_data_to_json(season_file_path, final_stats, match_id)
+    if save_to_json and league_id and season_id:
+        _save_to_json(final_stats, match_id, league_id, season_id)
     
     # =========================================================================
     # Save to MongoDB
     # =========================================================================
     if save_to_mongodb and MONGODB_AVAILABLE:
-        success, stats = _save_match_to_mongodb(final_stats, season_file_path)
+        success, stats = _save_match_to_mongodb(final_stats, league_id, season_id)
         if success:
             logger.debug(f"✅ MongoDB: Match {match_id} saved. "
                         f"Player stats: {stats['player_stats']}")
         else:
             logger.warning(f"⚠️ MongoDB save had issues for match {match_id}")
     
-    print(f"Processed match {match_id} from {season_file_path}")
+    logger.info(f"Processed match {match_id} (league: {league_id}, season: {season_id})")
     return final_stats
+
+
+def _determine_season_from_date(date_string: str) -> str:
+    """
+    Determine season ID from match date.
+    
+    Football seasons typically run Aug-May, so:
+    - Aug 2024 - May 2025 = "2024-2025"
+    - Aug 2023 - May 2024 = "2023-2024"
+    """
+    if not date_string:
+        now = datetime.now()
+        year = now.year
+        month = now.month
+    else:
+        dt = parse_datetime(date_string)
+        if not dt:
+            now = datetime.now()
+            year = now.year
+            month = now.month
+        else:
+            year = dt.year
+            month = dt.month
+    
+    if month >= 8:  # Aug-Dec
+        return f"{year}-{year + 1}"
+    else:  # Jan-Jul
+        return f"{year - 1}-{year}"
 
 
 # =============================================================================
@@ -579,22 +588,26 @@ def get_match_wise_player_stats(
 # =============================================================================
 
 def process_matches_batch(
-    x_mas: str,
-    match_ids: List[int],  # Now expects list of int
-    season_file_path: str,
+    match_ids: List[int],
+    league_id: int,
+    season_id: str,
     save_to_json: bool = True,
-    save_to_mongodb: bool = True
+    save_to_mongodb: bool = True,
+    no_browser: bool = False,
+    x_mas: str = None
 ) -> Dict[str, int]:
     """
     Process multiple matches in batch.
-    
+
     Args:
-        x_mas: X-MAS authentication token
-        match_ids: List of match IDs to process (int)
-        season_file_path: Path to season file
+        match_ids: List of match IDs to process (integers)
+        league_id: League ID (int)
+        season_id: Season ID (str)
         save_to_json: Whether to save JSON files
         save_to_mongodb: Whether to save to MongoDB
-        
+        no_browser: If True, skip browser-based fallback
+        x_mas: Deprecated, kept for backward compatibility (ignored)
+
     Returns:
         Dictionary with processing stats
     """
@@ -603,15 +616,16 @@ def process_matches_batch(
         "processed": 0,
         "failed": 0
     }
-    
+
     for match_id in match_ids:
         try:
             result = get_match_wise_player_stats(
-                x_mas=x_mas,
                 match_id=match_id,
-                season_file_path=season_file_path,
+                league_id=league_id,
+                season_id=season_id,
                 save_to_json=save_to_json,
-                save_to_mongodb=save_to_mongodb
+                save_to_mongodb=save_to_mongodb,
+                no_browser=no_browser
             )
             
             if result:

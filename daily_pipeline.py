@@ -12,10 +12,12 @@ Features:
     - Safe updates: won't overwrite existing data with empty responses
     - Optional JSON output for debugging
     - Token refresh every 35-40 matches
+    - Flexible date selection with --days-back flag
 
 Usage:
     python daily_pipeline.py                          # Fetch today's matches
     python daily_pipeline.py -d 20241215              # Fetch specific date
+    python daily_pipeline.py --days-back 1            # Fetch yesterday's matches
     python daily_pipeline.py --leagues 47,55,87       # Only specific leagues
     python daily_pipeline.py --no-json                # Skip JSON output
     python daily_pipeline.py --finished-only          # Only finished matches
@@ -24,6 +26,8 @@ Usage:
 
 CLI Flags:
     -d, --date DATE         Date to fetch (YYYYMMDD format, default: today)
+    --days-back N           Fetch matches from N days ago (overrides --date)
+                            Example: --days-back 1 for yesterday
     --leagues IDS           Comma-separated league IDs to filter (default: all)
                             Example: --leagues 47,55,87
     --no-json               Skip saving JSON files
@@ -34,12 +38,20 @@ CLI Flags:
     --dry-run               Show what would be processed without actually processing
     --status                Show match summary for the date and exit
     --force                 Force update even if match exists (bypass safety checks)
+    --no-browser            Never launch a browser; use only HTTP requests with dynamic auth
+    --no-headless           Run browser with visible window (for desktop debugging)
     --output-dir DIR        Custom output directory for JSON files (default: output/daily)
     -v, --verbose           Enable verbose/debug logging
 
 Examples:
     # Fetch all of today's finished matches
     python daily_pipeline.py --finished-only
+
+    # Fetch yesterday's finished matches (for late-night games)
+    python daily_pipeline.py --days-back 1 --finished-only
+
+    # Fetch matches from 2 days ago
+    python daily_pipeline.py --days-back 2 --finished-only
 
     # Fetch matches from a specific date
     python daily_pipeline.py -d 20241215 --finished-only
@@ -53,11 +65,27 @@ Examples:
     # Check match summary for today
     python daily_pipeline.py --status
 
+    # Check match summary for yesterday
+    python daily_pipeline.py --status --days-back 1
+
     # Test with 10 matches
     python daily_pipeline.py --match-limit 10
 
     # Skip JSON, only save to MongoDB
     python daily_pipeline.py --no-json --finished-only
+
+    # Server mode (no browser, pure HTTP — ideal for headless servers)
+    python daily_pipeline.py --no-browser --finished-only
+
+Cron Examples:
+    # Server: pure HTTP, no browser needed
+    0 */2 * * * cd /opt/football-stats-pipeline && source venv/bin/activate && python daily_pipeline.py --no-json --no-browser --finished-only
+
+    # Server: with headless browser fallback (default)
+    0 */2 * * * cd /opt/football-stats-pipeline && source venv/bin/activate && python daily_pipeline.py --no-json --finished-only
+
+    # Run once at 6 AM for yesterday's late matches
+    0 6 * * * cd /opt/football-stats-pipeline && source venv/bin/activate && python daily_pipeline.py --no-json --no-browser --finished-only --days-back 1
 """
 
 import argparse
@@ -66,13 +94,11 @@ import os
 import random
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Set
 
-# Add project root to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from service.get_auth_headers import capture_x_mas
+from service.get_auth_headers import capture_auth_info
+from service.auth_utils import set_auth_info
 from service.get_daily_matches import fetch_matches_by_date, get_match_ids_from_json
 from service.match_stats_processor import (
     fetch_match_details,
@@ -120,6 +146,34 @@ def parse_league_ids(leagues_str: str) -> Optional[List[int]]:
     return league_ids if league_ids else None
 
 
+def calculate_date(days_back: int = 0, base_date: str = None) -> str:
+    """
+    Calculate the target date based on days_back offset.
+    
+    Args:
+        days_back: Number of days to go back (0 = today, 1 = yesterday, etc.)
+        base_date: Optional base date in YYYYMMDD format (default: today)
+        
+    Returns:
+        Date string in YYYYMMDD format
+    """
+    if base_date:
+        # Parse the provided base date
+        try:
+            target = datetime.strptime(base_date, "%Y%m%d")
+        except ValueError:
+            logging.warning(f"Invalid date format '{base_date}', using today")
+            target = datetime.now()
+    else:
+        target = datetime.now()
+    
+    # Subtract days if days_back is specified
+    if days_back > 0:
+        target = target - timedelta(days=days_back)
+    
+    return target.strftime("%Y%m%d")
+
+
 # =============================================================================
 # Logging Configuration
 # =============================================================================
@@ -146,23 +200,13 @@ def setup_logging(verbose: bool = False):
 
 
 def _suppress_noisy_loggers():
-    """
-    Suppress verbose logs from third-party libraries.
-    
-    Selenium-wire logs every HTTP request/response which creates
-    hundreds of log lines just from loading one page.
-    """
+    """Suppress verbose logs from third-party libraries."""
     noisy_loggers = [
-        'seleniumwire.handler',
-        'seleniumwire.server', 
-        'seleniumwire.backend',
-        'seleniumwire.storage',
-        'seleniumwire',
         'urllib3',
         'hpack',
-        'selenium.webdriver.remote.remote_connection',
+        'playwright',
     ]
-    
+
     for logger_name in noisy_loggers:
         logging.getLogger(logger_name).setLevel(logging.WARNING)
 
@@ -192,20 +236,30 @@ def initialize_mongodb() -> bool:
 # Status Display
 # =============================================================================
 
-def show_daily_status(date: str, league_ids: List[int] = None) -> None:
+def show_daily_status(date: str, league_ids: List[int] = None, no_browser: bool = False) -> None:
     """
     Display match summary for a given date.
-    
+
     Shows:
     - Total matches scheduled
     - Matches by status (not started, in progress, finished)
     - Matches by league
     """
+    # Format date for display
+    try:
+        date_obj = datetime.strptime(date, "%Y%m%d")
+        date_display = date_obj.strftime("%Y-%m-%d (%A)")
+    except ValueError:
+        date_display = date
+
     print(f"\n{'='*60}")
     print(f"DAILY MATCH STATUS FOR {date}")
-    print(f"{'='*60}")
+    # Capture auth info (x-mas + cookies) — optional, dynamic headers work without it
+    auth_info = capture_auth_info(no_browser=no_browser)
+    if auth_info:
+        set_auth_info(auth_info)
     
-    # Try to load from cached JSON first
+    # Fetch matches
     result = fetch_matches_by_date(
         date=date,
         league_ids=league_ids,
@@ -274,7 +328,8 @@ def run_daily_pipeline(
     match_limit: int = None,
     dry_run: bool = False,
     force_update: bool = False,
-    output_dir: str = "output/daily"
+    output_dir: str = "output/daily",
+    no_browser: bool = False
 ) -> dict:
     """
     Run the daily data pipeline.
@@ -296,6 +351,13 @@ def run_daily_pipeline(
     """
     logger = logging.getLogger(__name__)
     
+    # Format date for display
+    try:
+        date_obj = datetime.strptime(date, "%Y%m%d")
+        date_display = date_obj.strftime("%Y-%m-%d (%A)")
+    except ValueError:
+        date_display = date
+    
     stats = {
         "date": date,
         "total_matches": 0,
@@ -308,9 +370,10 @@ def run_daily_pipeline(
     }
     
     failed_matches = []  # Track failed match IDs with errors
+    skipped_matches = []  # Track skipped match IDs with reasons
     
     logger.info(f"{'='*60}")
-    logger.info(f"DAILY PIPELINE - Processing date: {date}")
+    logger.info(f"DAILY PIPELINE - Processing date: {date} ({date_display})")
     logger.info(f"{'='*60}")
     logger.info(f"Configuration:")
     logger.info(f"  - Leagues filter: {league_ids or 'All leagues'}")
@@ -321,27 +384,30 @@ def run_daily_pipeline(
     logger.info(f"  - Match limit: {match_limit or 'No limit'}")
     logger.info(f"  - Dry run: {dry_run}")
     logger.info(f"  - Force update: {force_update}")
+    logger.info(f"  - No browser: {no_browser}")
     logger.info(f"{'='*60}")
-    
+
     # =========================================================================
     # Step 1: Initialize MongoDB (if enabled)
     # =========================================================================
-    if save_to_mongodb and not dry_run:
-        if not initialize_mongodb():
-            logger.error("MongoDB initialization failed, continuing with JSON only")
-            save_to_mongodb = False
-    
     # =========================================================================
-    # Step 2: Capture X-MAS token
+    # Step 2: Auth — browser capture is optional, dynamic headers always work
     # =========================================================================
-    logger.info("Capturing X-MAS token...")
-    x_mas = capture_x_mas()
-    
-    if not x_mas:
-        logger.error("❌ Failed to capture X-MAS token. Exiting.")
-        return stats
-    
-    logger.info(f"✅ X-MAS token captured: {x_mas[:30]}...")
+    if not no_browser:
+        logger.info("Attempting browser-based auth capture for enhanced cookies...")
+        auth_info = capture_auth_info()
+        if auth_info:
+            set_auth_info(auth_info)
+            logger.info("Browser auth captured successfully")
+        else:
+            logger.warning("Browser auth failed, falling back to dynamic-only x-mas headers")
+    else:
+        logger.info("No-browser mode: using dynamically generated x-mas headers only")
+
+    # Ensure client_version is loaded (pure HTTP, no browser)
+    from service.auth_utils import get_live_client_version, _SESSION_AUTH
+    if _SESSION_AUTH["client_version"] is None:
+        _SESSION_AUTH["client_version"] = get_live_client_version()
     
     # =========================================================================
     # Step 3: Fetch matches for the date
@@ -350,10 +416,10 @@ def run_daily_pipeline(
     
     result = fetch_matches_by_date(
         date=date,
-        x_mas=x_mas,
         league_ids=league_ids,
         save_to_json=save_to_json,
-        output_dir=output_dir
+        output_dir=output_dir,
+        no_browser=no_browser
     )
     
     if not result:
@@ -369,7 +435,6 @@ def run_daily_pipeline(
     # Step 4: Filter matches by status
     # =========================================================================
     matches_to_process = []
-    skipped_matches = []  # Track skipped match IDs with reasons
     
     for match in matches:
         status = match.get("status", {})
@@ -435,25 +500,19 @@ def run_daily_pipeline(
         match_id = match["match_id"]  # Already int
         league_id = safe_int(match.get("league_id"))  # Convert to int
         
-        logger.info(f"[{idx}/{len(matches_to_process)}] Processing match {match_id} ({match.get('league_name', 'Unknown')})")
-        
-        iteration_count += 1
-        
-        # Refresh token every 35-40 matches
-        if iteration_count >= token_refresh_threshold:
-            logger.info("Refreshing X-MAS token...")
-            x_mas = capture_x_mas()
-            if not x_mas:
-                logger.error("❌ Failed to refresh X-MAS token")
-                stats["failed"] += 1
-                continue
-            logger.info(f"✅ Token refreshed: {x_mas[:30]}...")
-            iteration_count = 0
-            token_refresh_threshold = random.randint(35, 40)
-        
+        # Refresh session every 45 matches to keep cookies fresh (browser mode only)
+        if not no_browser and idx > 0 and idx % 45 == 0:
+            logger.info("Refreshing session auth info...")
+            auth_info = capture_auth_info()
+            if auth_info:
+                set_auth_info(auth_info)
+                logger.info("Session refreshed")
+            else:
+                logger.warning("Failed to refresh session, continuing with old auth info")
+
         # Fetch match details
         try:
-            response_data = fetch_match_details(x_mas, match_id)
+            response_data = fetch_match_details(match_id, no_browser=no_browser)
             
             if not response_data:
                 logger.warning(f"No data returned for match {match_id}")
@@ -523,7 +582,7 @@ def run_daily_pipeline(
     print(f"\n{'='*60}")
     print("DAILY PIPELINE COMPLETE")
     print(f"{'='*60}")
-    print(f"Date: {date}")
+    print(f"Date: {date} ({date_display})")
     print(f"Total matches found: {stats['total_matches']}")
     print(f"Matches processed: {stats['processed']}")
     print(f"Matches skipped: {stats['skipped']}")
@@ -591,22 +650,39 @@ def main():
         epilog="""
 Examples:
     python daily_pipeline.py                          # Fetch today's matches
+    python daily_pipeline.py --days-back 1            # Fetch yesterday's matches
+    python daily_pipeline.py --days-back 2            # Fetch matches from 2 days ago
     python daily_pipeline.py -d 20241215              # Fetch specific date
     python daily_pipeline.py --leagues 47,55,87       # Only specific leagues
     python daily_pipeline.py --no-json                # Skip JSON output
     python daily_pipeline.py --finished-only          # Only finished matches
     python daily_pipeline.py --dry-run                # Preview without processing
     python daily_pipeline.py --status                 # Show match summary
+    python daily_pipeline.py --status --days-back 1   # Show yesterday's summary
     python daily_pipeline.py --match-limit 10         # Test with 10 matches
+
+Server/Cron Examples:
+    # Server: pure HTTP, no browser (recommended for cron)
+    0 */2 * * * cd /opt/football-stats-pipeline && source venv/bin/activate && python daily_pipeline.py --no-json --no-browser --finished-only
+
+    # Once at 6 AM for yesterday's late matches
+    0 6 * * * cd /opt/football-stats-pipeline && source venv/bin/activate && python daily_pipeline.py --no-json --no-browser --finished-only --days-back 1
         """
     )
     
-    # Date argument
+    # Date arguments
     parser.add_argument(
         "-d", "--date",
         type=str,
-        default=datetime.now().strftime("%Y%m%d"),
+        default=None,
         help="Date to fetch (YYYYMMDD format, default: today)"
+    )
+    
+    parser.add_argument(
+        "--days-back",
+        type=int,
+        default=0,
+        help="Fetch matches from N days ago (0=today, 1=yesterday, etc.). Overrides --date if both provided."
     )
     
     # League filter
@@ -675,7 +751,20 @@ Examples:
         action="store_true",
         help="Force update even if match exists (bypass safety checks)"
     )
-    
+
+    # Browser mode
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Never launch a browser. Use only HTTP requests with dynamic auth headers. Ideal for headless servers."
+    )
+
+    parser.add_argument(
+        "--no-headless",
+        action="store_true",
+        help="Run browser with visible window (for desktop debugging). Ignored if --no-browser is set."
+    )
+
     # Logging
     parser.add_argument(
         "-v", "--verbose",
@@ -687,18 +776,36 @@ Examples:
     
     # Setup logging
     logger = setup_logging(args.verbose)
+
+    # Configure headless mode for Playwright
+    if not args.no_browser:
+        try:
+            from service.playwright_auth import set_headless_mode
+            set_headless_mode(not args.no_headless)
+        except ImportError:
+            logger.info("Playwright not installed, browser features unavailable")
+
+    # Calculate the target date
+    # --days-back takes precedence over --date
+    if args.days_back > 0:
+        target_date = calculate_date(days_back=args.days_back)
+        logger.info(f"Using --days-back {args.days_back}: targeting {target_date}")
+    elif args.date:
+        target_date = args.date
+    else:
+        target_date = datetime.now().strftime("%Y%m%d")
     
     # Parse league IDs (now returns List[int])
     league_ids = parse_league_ids(args.leagues)
     
     # Status mode
     if args.status:
-        show_daily_status(args.date, league_ids)
+        show_daily_status(target_date, league_ids, no_browser=args.no_browser)
         return
     
     # Run pipeline
     stats = run_daily_pipeline(
-        date=args.date,
+        date=target_date,
         league_ids=league_ids,
         save_to_json=not args.no_json,
         save_to_mongodb=not args.no_mongodb,
@@ -707,7 +814,8 @@ Examples:
         match_limit=args.match_limit,
         dry_run=args.dry_run,
         force_update=args.force,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        no_browser=args.no_browser
     )
     
     # Exit code based on success

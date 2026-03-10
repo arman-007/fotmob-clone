@@ -4,7 +4,9 @@ Service Module
 Contains functions for fetching data from FotMob API.
 
 Modules:
-- get_auth_headers: X-MAS token capture using Selenium
+- get_auth_headers: Auth capture (browser-based, optional)
+- auth_utils: Dynamic x-mas header generation (pure HTTP)
+- playwright_auth: Playwright browser automation (optional)
 - get_leagues: Fetch all leagues
 - get_specific_league: Fetch league/season data
 - get_player_stats: Fetch player stats (historical pipeline)
@@ -12,7 +14,14 @@ Modules:
 - match_stats_processor: Shared processing logic for match stats
 """
 
-from service.get_auth_headers import capture_x_mas
+from service.get_auth_headers import capture_auth_info
+from service.auth_utils import get_auth_headers, set_auth_info
+
+try:
+    from service.playwright_auth import set_headless_mode
+except ImportError:
+    def set_headless_mode(headless: bool):
+        pass
 from service.get_leagues import get_all_leagues
 from service.get_specific_league import get_specific_league_data
 from service.get_player_stats import get_match_wise_player_stats
@@ -35,7 +44,10 @@ from service.match_stats_processor import (
 
 __all__ = [
     # Authentication
-    "capture_x_mas",
+    "capture_auth_info",
+    "get_auth_headers",
+    "set_auth_info",
+    "set_headless_mode",
     
     # Historical pipeline
     "get_all_leagues",

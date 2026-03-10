@@ -1,25 +1,41 @@
-# Football Stats Pipeline - Dependencies
-
-# HTTP & Web
-requests>=2.28.0
-selenium-wire>=5.1.0
-
-# Environment
-python-dotenv>=1.0.0
-
-# MongoDB
-pymongo>=4.5.0
-
-# Data Validation
-pydantic>=2.0.0
-
-# Compression (if needed)
-brotli>=1.1.0
-
-# Timezone
-tzlocal>=5.0
-
-# Optional: For development
-# pytest>=7.0.0
-# black>=23.0.0
-# flake8>=6.0.0
+annotated-types==0.7.0
+attrs==25.4.0
+blinker==1.7.0
+brotli==1.2.0
+certifi==2025.11.12
+cffi==2.0.0
+charset-normalizer==3.4.4
+cryptography==46.0.3
+dnspython==2.8.0
+h11==0.16.0
+h2==4.3.0
+hpack==4.1.0
+hyperframe==6.1.0
+idna==3.11
+kaitaistruct==0.11
+outcome==1.3.0.post0
+packaging==25.0
+pyasn1==0.6.1
+pycparser==2.23
+pydantic==2.12.5
+pydantic_core==2.41.5
+pymongo==4.15.5
+pyOpenSSL==25.3.0
+pyparsing==3.2.5
+PySocks==1.7.1
+python-dotenv==1.2.1
+requests==2.32.5
+playwright
+playwright-stealth
+setuptools==80.9.0
+sniffio==1.3.1
+sortedcontainers==2.4.0
+trio==0.32.0
+trio-websocket==0.12.2
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+tzlocal==5.3.1
+urllib3==2.6.2
+websocket-client==1.9.0
+wsproto==1.3.2
+zstandard==0.25.0
