@@ -482,42 +482,44 @@ def _process_match_info(response_data: Optional[dict]) -> dict:
 # =============================================================================
 
 def get_match_wise_player_stats(
-    x_mas: str,
     match_id: Union[int, str],
     league_id: Union[int, str] = None,
     season_id: str = None,
     save_to_json: bool = True,
-    save_to_mongodb: bool = True
+    save_to_mongodb: bool = True,
+    no_browser: bool = False,
+    x_mas: str = None
 ) -> dict:
     """
     Fetch and store player stats for a specific match.
-    
-    Uses in-memory data flow - no file reads required.
-    
+
+    Uses the 3-tier fallback strategy from match_stats_processor:
+      1. HTML __NEXT_DATA__ extraction (pure HTTP)
+      2. API call with dynamic x-mas headers (pure HTTP)
+      3. Playwright browser fetch (optional)
+
     Args:
-        x_mas: X-MAS authentication token
         match_id: Match ID to fetch (int or str)
         league_id: League ID (int or str) - passed directly, no file path needed
         season_id: Season ID (str, e.g., "2024-2025") - passed directly
         save_to_json: Whether to save to JSON (default: True for debugging)
         save_to_mongodb: Whether to save to MongoDB (default: True)
-        
+        no_browser: If True, skip browser-based fallback
+        x_mas: Deprecated, kept for backward compatibility (ignored)
+
     Returns:
         Processed match stats dictionary
     """
     match_id = safe_int(match_id)
     league_id = safe_int(league_id)
-    
-    if not x_mas:
-        logger.error(f"❌ X-MAS token is None/empty for match {match_id}!")
-        return {}
-    
+
     if not match_id:
-        logger.error(f"❌ Invalid match_id!")
+        logger.error(f"Invalid match_id!")
         return {}
-    
-    # Fetch data from API
-    response_data = _make_request(x_mas, match_id)
+
+    # Use the 3-tier fetch from match_stats_processor
+    from service.match_stats_processor import fetch_match_details
+    response_data = fetch_match_details(match_id, no_browser=no_browser)
     final_stats = _process_match_info(response_data)
     
     if not final_stats:
@@ -586,24 +588,26 @@ def _determine_season_from_date(date_string: str) -> str:
 # =============================================================================
 
 def process_matches_batch(
-    x_mas: str,
     match_ids: List[int],
     league_id: int,
     season_id: str,
     save_to_json: bool = True,
-    save_to_mongodb: bool = True
+    save_to_mongodb: bool = True,
+    no_browser: bool = False,
+    x_mas: str = None
 ) -> Dict[str, int]:
     """
     Process multiple matches in batch.
-    
+
     Args:
-        x_mas: X-MAS authentication token
         match_ids: List of match IDs to process (integers)
         league_id: League ID (int)
         season_id: Season ID (str)
         save_to_json: Whether to save JSON files
         save_to_mongodb: Whether to save to MongoDB
-        
+        no_browser: If True, skip browser-based fallback
+        x_mas: Deprecated, kept for backward compatibility (ignored)
+
     Returns:
         Dictionary with processing stats
     """
@@ -612,16 +616,16 @@ def process_matches_batch(
         "processed": 0,
         "failed": 0
     }
-    
+
     for match_id in match_ids:
         try:
             result = get_match_wise_player_stats(
-                x_mas=x_mas,
                 match_id=match_id,
                 league_id=league_id,
                 season_id=season_id,
                 save_to_json=save_to_json,
-                save_to_mongodb=save_to_mongodb
+                save_to_mongodb=save_to_mongodb,
+                no_browser=no_browser
             )
             
             if result:

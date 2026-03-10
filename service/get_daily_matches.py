@@ -22,7 +22,11 @@ import requests
 from dotenv import load_dotenv
 
 from service.auth_utils import get_auth_headers, generate_x_mas_header
-from service.playwright_auth import fetch_json_playwright
+
+try:
+    from service.playwright_auth import fetch_json_playwright
+except ImportError:
+    fetch_json_playwright = None
 from utils.get_timezone import get_local_time_zone
 
 load_dotenv()
@@ -48,7 +52,8 @@ def fetch_matches_by_date(
     date: str,
     league_ids: List[int] = None,
     save_to_json: bool = True,
-    output_dir: str = "output/daily"
+    output_dir: str = "output/daily",
+    no_browser: bool = False
 ) -> Optional[Dict[str, Any]]:
     """
     Fetch all matches for a specific date from FotMob API.
@@ -90,10 +95,12 @@ def fetch_matches_by_date(
         response = requests.get(url, params=params, headers=headers, timeout=15)
         
         if response.status_code == 403:
+            if no_browser or fetch_json_playwright is None:
+                logger.error(f"403 Forbidden for date {date}. Browser fallback unavailable (--no-browser or Playwright not installed).")
+                return None
             logger.warning(f"403 Forbidden for date {date}, falling back to Playwright...")
             fallback_path = f"/api/data/matches?date={date}&timezone={timezone}"
             api_url = f"https://www.fotmob.com{fallback_path}"
-            # Pass x-mas header for the in-page fetch
             fallback_headers = {"x-mas": generate_x_mas_header(fallback_path)}
             data = fetch_json_playwright(api_url, headers=fallback_headers)
             if not data:

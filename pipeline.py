@@ -89,7 +89,8 @@ from datetime import timezone
 from typing import List, Optional, Set
 
 # Service imports
-from service.get_auth_headers import capture_x_mas
+from service.get_auth_headers import capture_auth_info
+from service.auth_utils import set_auth_info
 from service.get_leagues import get_all_leagues
 from service.get_specific_league import get_specific_league_data
 from service.get_player_stats import get_match_wise_player_stats
@@ -443,7 +444,8 @@ def run_pipeline(
     league_limit: int = None,
     skip_leagues: Set[int] = None,
     force: bool = False,
-    retry_failed_only: bool = False
+    retry_failed_only: bool = False,
+    no_browser: bool = False
 ):
     """
     Run the complete data pipeline with checkpoint/resume support.
@@ -479,14 +481,22 @@ def run_pipeline(
     # =========================================================================
     logger.info(f"{'='*30} Step 1: Get all leagues {'='*30}")
     
-    # Capture X-MAS token once and reuse throughout the pipeline
-    logger.info("Capturing X-MAS token...")
-    x_mas_token = capture_x_mas()
-    if x_mas_token:
-        logger.info(f"✅ X-MAS token captured: {x_mas_token[:30]}...")
+    # Auth: browser-based capture is optional, dynamic headers always work
+    if not no_browser:
+        logger.info("Attempting browser-based auth capture...")
+        auth_info = capture_auth_info()
+        if auth_info:
+            set_auth_info(auth_info)
+            logger.info("Browser auth captured successfully")
+        else:
+            logger.warning("Browser auth failed, using dynamic-only x-mas headers")
     else:
-        logger.error("❌ Failed to capture X-MAS token. Exiting.")
-        return
+        logger.info("No-browser mode: using dynamically generated x-mas headers only")
+
+    # Ensure client_version is loaded (pure HTTP, no browser)
+    from service.auth_utils import get_live_client_version, _SESSION_AUTH
+    if _SESSION_AUTH["client_version"] is None:
+        _SESSION_AUTH["client_version"] = get_live_client_version()
     
     league_data = get_all_leagues(
         save_to_json=save_to_json,
@@ -529,7 +539,6 @@ def run_pipeline(
         # Fetch league/season data - returns in-memory data with match IDs
         league_data_result = get_specific_league_data(
             league_id,  # int
-            x_mas=x_mas_token,
             save_to_json=save_to_json,
             save_to_mongodb=save_to_mongodb
         )
@@ -570,17 +579,15 @@ def run_pipeline(
                 if matches_to_retry:
                     logger.info(f"🔄 Retrying {len(matches_to_retry)} failed matches for {league_id}_{season_id}")
             
-            # Capture fresh X-MAS token for each season
-            logger.info("Refreshing X-MAS token for this season...")
-            x_mas_token = capture_x_mas()
-            
-            if not x_mas_token:
-                logger.error("Failed to capture X-MAS token. Skipping season.")
-                if state_manager:
-                    state_manager.mark_season_failed(league_id, season_id, "Failed to capture X-MAS token")
-                continue
-            
-            logger.info(f"✅ X-MAS token refreshed: {x_mas_token[:30]}...")
+            # Refresh auth for each season (browser mode only)
+            if not no_browser:
+                logger.info("Refreshing auth for this season...")
+                auth_info = capture_auth_info()
+                if auth_info:
+                    set_auth_info(auth_info)
+                    logger.info("Auth refreshed successfully")
+                else:
+                    logger.warning("Auth refresh failed, continuing with dynamic headers")
             
             # Determine which matches to process
             if matches_to_retry:
@@ -626,12 +633,12 @@ def run_pipeline(
                 
                 try:
                     result = get_match_wise_player_stats(
-                        x_mas=x_mas_token,
                         match_id=match_id,  # int
                         league_id=league_id,  # int - pass directly
                         season_id=season_id,  # str
                         save_to_json=save_to_json,
-                        save_to_mongodb=save_to_mongodb
+                        save_to_mongodb=save_to_mongodb,
+                        no_browser=no_browser
                     )
                     
                     if result:
@@ -804,11 +811,32 @@ Examples:
         action="store_true",
         help="Enable verbose/debug logging"
     )
-    
+
+    # Browser mode
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Never launch a browser. Use only HTTP requests with dynamic auth headers."
+    )
+
+    parser.add_argument(
+        "--no-headless",
+        action="store_true",
+        help="Run browser with visible window (for desktop debugging). Ignored if --no-browser is set."
+    )
+
     args = parser.parse_args()
-    
+
     # Setup logging
     setup_logging(args.verbose)
+
+    # Configure headless mode for Playwright
+    if not args.no_browser:
+        try:
+            from service.playwright_auth import set_headless_mode
+            set_headless_mode(not args.no_headless)
+        except ImportError:
+            logger.info("Playwright not installed, browser features unavailable")
     
     # If --status flag, just show status and exit
     if args.status:
@@ -847,5 +875,6 @@ Examples:
         league_limit=args.league_limit,
         skip_leagues=skip_leagues,
         force=args.force,
-        retry_failed_only=args.retry_failed
+        retry_failed_only=args.retry_failed,
+        no_browser=args.no_browser
     )

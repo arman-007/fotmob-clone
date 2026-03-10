@@ -75,7 +75,11 @@ URL = os.environ.get("URL")
 
 
 from service.auth_utils import get_auth_headers, generate_x_mas_header
-from service.playwright_auth import fetch_json_playwright
+
+try:
+    from service.playwright_auth import fetch_json_playwright
+except ImportError:
+    fetch_json_playwright = None
 
 # =============================================================================
 # API Request Functions
@@ -83,55 +87,75 @@ from service.playwright_auth import fetch_json_playwright
 
 import re
 
-def fetch_match_details(match_id: Union[int, str]) -> Optional[dict]:
+def fetch_match_details(match_id: Union[int, str], no_browser: bool = False) -> Optional[dict]:
     """
-    Fetch match details by extracting the Next.js state from the match page HTML.
-    This completely bypasses the /api/data/matchDetails Cloudflare protection.
-    Falls back to Playwright if the HTML extraction fails.
+    Fetch match details using a 3-tier fallback strategy:
+      1. Extract from __NEXT_DATA__ in HTML (pure HTTP, no auth needed)
+      2. API call with dynamically generated x-mas headers (pure HTTP, no browser)
+      3. Playwright in-page fetch (browser, last resort — skipped if no_browser=True)
     """
+    # === Tier 1: HTML __NEXT_DATA__ extraction (no auth needed) ===
     url = f"https://www.fotmob.com/match/{match_id}"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
     }
-    
+
     try:
-        logger.info(f"Extracting Next.js data from HTML: {url}")
+        logger.info(f"[Tier 1] Extracting Next.js data from HTML: {url}")
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
-        
+
         match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', response.text)
         if match:
             data = json.loads(match.group(1))
             if 'props' in data and 'pageProps' in data['props']:
-                # The pageProps contains the exact same structure as the API response!
                 page_props = data['props']['pageProps']
                 if 'general' in page_props:
-                    logger.info(f"✅ Successfully extracted NEXT_DATA for match {match_id}")
+                    logger.info(f"[Tier 1] Successfully extracted NEXT_DATA for match {match_id}")
                     return page_props
-        
-        logger.warning(f"__NEXT_DATA__ not found or missing 'general' key for match {match_id}. HTML size: {len(response.text)}")
+
+        logger.warning(f"[Tier 1] __NEXT_DATA__ not found or missing 'general' key for match {match_id}. HTML size: {len(response.text)}")
     except Exception as e:
-        logger.warning(f"HTML extraction failed for match {match_id}: {e}")
-        
-    logger.info("Falling back to Playwright API fetch...")
-    if not URL:
-        logger.error("URL environment variable is not set")
-        return None
-        
+        logger.warning(f"[Tier 1] HTML extraction failed for match {match_id}: {e}")
+
+    # === Tier 2: API call with dynamic x-mas headers (no browser) ===
     api_path = f"/api/data/matchDetails?matchId={match_id}"
     api_url = f"https://www.fotmob.com{api_path}"
-    
+
     try:
+        logger.info(f"[Tier 2] Trying API with dynamic x-mas headers for match {match_id}...")
+        api_headers = get_auth_headers(api_path)
+        api_response = requests.get(api_url, headers=api_headers, timeout=15)
+        if api_response.status_code == 200:
+            data = api_response.json()
+            if data and 'general' in data:
+                logger.info(f"[Tier 2] Successfully fetched match {match_id} via API")
+                return data
+        else:
+            logger.warning(f"[Tier 2] API returned {api_response.status_code} for match {match_id}")
+    except Exception as e:
+        logger.warning(f"[Tier 2] API request failed for match {match_id}: {e}")
+
+    # === Tier 3: Playwright in-page fetch (browser, last resort) ===
+    if no_browser:
+        logger.warning(f"[Tier 3] Skipped (--no-browser mode). No data for match {match_id}.")
+        return None
+
+    if fetch_json_playwright is None:
+        logger.warning(f"[Tier 3] Playwright not installed. No data for match {match_id}.")
+        return None
+
+    try:
+        logger.info(f"[Tier 3] Falling back to Playwright for match {match_id}...")
         headers_pw = {"x-mas": generate_x_mas_header(api_path)}
         data = fetch_json_playwright(api_url, headers=headers_pw)
         if data:
             return data
-            
     except Exception as e:
-        logger.error(f"❌ Error fetching match details for {match_id} via Playwright: {e}")
-        
+        logger.error(f"[Tier 3] Playwright fetch failed for match {match_id}: {e}")
+
     return None
 
 

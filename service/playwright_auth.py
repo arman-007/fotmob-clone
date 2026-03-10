@@ -4,35 +4,63 @@ import json
 import base64
 import random
 from typing import Dict, Optional, Any
-from playwright.sync_api import sync_playwright
-from playwright_stealth import Stealth
 
 logger = logging.getLogger(__name__)
+
+# Optional Playwright imports — pipeline works without them in --no-browser mode
+try:
+    from playwright.sync_api import sync_playwright
+    from playwright_stealth import Stealth
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+    logger.info("Playwright not installed. Browser-based fallbacks will be unavailable.")
+
+# Default to headless=True for server environments (no display required)
+_HEADLESS_MODE = True
+
+_BROWSER_ARGS = [
+    '--no-sandbox',
+    '--disable-blink-features=AutomationControlled',
+    '--disable-dev-shm-usage',
+]
 
 _GLOBAL_PLAYWRIGHT = None
 _GLOBAL_BROWSER = None
 _GLOBAL_CONTEXT = None
 
+
+def set_headless_mode(headless: bool):
+    """Configure whether Playwright launches in headless mode (default: True)."""
+    global _HEADLESS_MODE
+    _HEADLESS_MODE = headless
+
+
 def get_playwright_context():
     """Get or create a persistent Playwright context."""
     global _GLOBAL_PLAYWRIGHT, _GLOBAL_BROWSER, _GLOBAL_CONTEXT
+
+    if not PLAYWRIGHT_AVAILABLE:
+        raise RuntimeError("Playwright is not installed. Install with: pip install playwright playwright-stealth && playwright install chromium")
+
     if _GLOBAL_CONTEXT:
         try:
-            # Check if browser is still connected
             if _GLOBAL_BROWSER.is_connected():
                 return _GLOBAL_CONTEXT
         except:
             pass
-    
+
     if _GLOBAL_PLAYWRIGHT:
         try:
             _GLOBAL_PLAYWRIGHT.stop()
         except:
             pass
-            
+
     _GLOBAL_PLAYWRIGHT = sync_playwright().start()
-    # Use non-headless to consistently bypass Cloudflare
-    _GLOBAL_BROWSER = _GLOBAL_PLAYWRIGHT.chromium.launch(headless=False)
+    _GLOBAL_BROWSER = _GLOBAL_PLAYWRIGHT.chromium.launch(
+        headless=_HEADLESS_MODE,
+        args=_BROWSER_ARGS,
+    )
     user_agent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
     _GLOBAL_CONTEXT = _GLOBAL_BROWSER.new_context(
         user_agent=user_agent,
@@ -42,6 +70,9 @@ def get_playwright_context():
 
 def fetch_json_playwright(url: str, headers: Optional[Dict[str, str]] = None, max_retries: int = 2) -> Optional[Dict[str, Any]]:
     """Fetch JSON data using in-page fetch() to bypass Cloudflare."""
+    if not PLAYWRIGHT_AVAILABLE:
+        logger.warning("Playwright not available, cannot use browser fallback")
+        return None
     context = get_playwright_context()
     stealth_util = Stealth()
     
@@ -116,15 +147,20 @@ def capture_auth_info_playwright(url: str = "https://www.fotmob.com/", max_retri
     Capture auth information (X-MAS token and cookies) using Playwright.
     More robust against Cloudflare detection.
     """
+    if not PLAYWRIGHT_AVAILABLE:
+        logger.warning("Playwright not available, cannot capture auth info via browser")
+        return None
     stealth_util = Stealth()
     user_agent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
-    
+
     for attempt in range(1, max_retries + 1):
         try:
             with sync_playwright() as p:
                 logger.info(f"Playwright: Starting capture attempt {attempt}...")
-                # Use non-headless for capture to ensure Turnstile is solved
-                browser = p.chromium.launch(headless=False)
+                browser = p.chromium.launch(
+                    headless=_HEADLESS_MODE,
+                    args=_BROWSER_ARGS,
+                )
                 
                 context = browser.new_context(
                     user_agent=user_agent,
