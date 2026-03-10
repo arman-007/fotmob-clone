@@ -445,11 +445,12 @@ def run_pipeline(
     skip_leagues: Set[int] = None,
     force: bool = False,
     retry_failed_only: bool = False,
-    no_browser: bool = False
+    no_browser: bool = False,
+    skip_individual_player_stats: bool = False
 ):
     """
     Run the complete data pipeline with checkpoint/resume support.
-    
+
     Args:
         source: League source ('popular', 'international', 'countries', 'all')
                 Default is 'all' to process all available leagues.
@@ -638,7 +639,8 @@ def run_pipeline(
                         season_id=season_id,  # str
                         save_to_json=save_to_json,
                         save_to_mongodb=save_to_mongodb,
-                        no_browser=no_browser
+                        no_browser=no_browser,
+                        skip_individual_player_stats=skip_individual_player_stats
                     )
                     
                     if result:
@@ -820,6 +822,12 @@ Examples:
     )
 
     parser.add_argument(
+        "--skip-individual-player-stats",
+        action="store_true",
+        help="Skip populating the player_stats collection in MongoDB. Match documents (with embedded player data) are still saved."
+    )
+
+    parser.add_argument(
         "--no-headless",
         action="store_true",
         help="Run browser with visible window (for desktop debugging). Ignored if --no-browser is set."
@@ -876,5 +884,6 @@ Examples:
         skip_leagues=skip_leagues,
         force=args.force,
         retry_failed_only=args.retry_failed,
-        no_browser=args.no_browser
+        no_browser=args.no_browser,
+        skip_individual_player_stats=args.skip_individual_player_stats
     )

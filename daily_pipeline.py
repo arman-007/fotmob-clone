@@ -329,7 +329,8 @@ def run_daily_pipeline(
     dry_run: bool = False,
     force_update: bool = False,
     output_dir: str = "output/daily",
-    no_browser: bool = False
+    no_browser: bool = False,
+    skip_individual_player_stats: bool = False
 ) -> dict:
     """
     Run the daily data pipeline.
@@ -547,7 +548,8 @@ def run_daily_pipeline(
                 success, mongo_stats = save_match_to_mongodb(
                     match_data=processed_data,
                     league_id=league_id,  # Now int
-                    safe_update=not force_update
+                    safe_update=not force_update,
+                    skip_individual_player_stats=skip_individual_player_stats
                 )
                 
                 if success:
@@ -760,6 +762,12 @@ Server/Cron Examples:
     )
 
     parser.add_argument(
+        "--skip-individual-player-stats",
+        action="store_true",
+        help="Skip populating the player_stats collection in MongoDB. Match documents (with embedded player data) are still saved."
+    )
+
+    parser.add_argument(
         "--no-headless",
         action="store_true",
         help="Run browser with visible window (for desktop debugging). Ignored if --no-browser is set."
@@ -815,7 +823,8 @@ Server/Cron Examples:
         dry_run=args.dry_run,
         force_update=args.force,
         output_dir=args.output_dir,
-        no_browser=args.no_browser
+        no_browser=args.no_browser,
+        skip_individual_player_stats=args.skip_individual_player_stats
     )
     
     # Exit code based on success

@@ -120,7 +120,8 @@ def _save_to_json(
 def _save_match_to_mongodb(
     match_data: dict,
     league_id: int,
-    season_id: str
+    season_id: str,
+    skip_individual_player_stats: bool = False
 ) -> Tuple[bool, Dict[str, int]]:
     """
     Save match data to MongoDB (both matches and player_stats collections).
@@ -296,19 +297,19 @@ def _save_match_to_mongodb(
             logger.warning(f"Failed to insert match {match_id}: {error}")
             stats["errors"] += 1
         
-        # Bulk insert player stats
-        if flattened_player_stats:
+        # Bulk insert player stats (skip if flag is set)
+        if flattened_player_stats and not skip_individual_player_stats:
             ps_result = mongo.insert_player_stats_bulk(flattened_player_stats, validate=True)
             stats["player_stats"] = ps_result.get("inserted", 0) + ps_result.get("modified", 0)
             stats["errors"] += ps_result.get("errors", 0)
-        
+
         # Insert teams
         if teams_to_insert:
             team_result = mongo.insert_teams_bulk(teams_to_insert)
             stats["teams"] = team_result.get("inserted", 0) + team_result.get("modified", 0)
-        
+
         return True, stats
-        
+
     except Exception as e:
         logger.error(f"Error saving match {match_id} to MongoDB: {e}")
         stats["errors"] += 1
@@ -488,6 +489,7 @@ def get_match_wise_player_stats(
     save_to_json: bool = True,
     save_to_mongodb: bool = True,
     no_browser: bool = False,
+    skip_individual_player_stats: bool = False,
     x_mas: str = None
 ) -> dict:
     """
@@ -544,7 +546,7 @@ def get_match_wise_player_stats(
     # Save to MongoDB
     # =========================================================================
     if save_to_mongodb and MONGODB_AVAILABLE:
-        success, stats = _save_match_to_mongodb(final_stats, league_id, season_id)
+        success, stats = _save_match_to_mongodb(final_stats, league_id, season_id, skip_individual_player_stats=skip_individual_player_stats)
         if success:
             logger.debug(f"✅ MongoDB: Match {match_id} saved. "
                         f"Player stats: {stats['player_stats']}")
